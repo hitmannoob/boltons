@@ -780,3 +780,360 @@ def test_frange_xfrange_zero_step():
         frange(10, step=0)
     with pytest.raises(ValueError):
         list(xfrange(10, step=0))
+
+
+class TestChunkedCoverage:
+    def test_count_and_fill(self):
+        from boltons.iterutils import chunked
+
+        assert chunked(range(10), 3, count=2) == [[0, 1, 2], [3, 4, 5]]
+        assert chunked(range(10), 3, fill=None) == [
+            [0, 1, 2], [3, 4, 5], [6, 7, 8], [9, None, None]]
+
+    def test_string_source_joins(self):
+        from boltons.iterutils import chunked, chunked_iter
+
+        assert list(chunked_iter('abcdef', 2)) == ['ab', 'cd', 'ef']
+        assert chunked('abcde', 2, fill='x') == ['ab', 'cd', 'ex']
+
+    def test_validation(self):
+        from boltons.iterutils import chunked_iter
+
+        with pytest.raises(TypeError):
+            list(chunked_iter(1, 2))
+        with pytest.raises(ValueError):
+            list(chunked_iter(range(3), 0))
+        with pytest.raises(ValueError):
+            list(chunked_iter(range(3), -1))
+        with pytest.raises(ValueError):
+            list(chunked_iter(range(3), 2, bogus=True))
+        # string sizes are coerced to int
+        assert list(chunked_iter(range(3), '2')) == [[0, 1], [2]]
+
+
+def test_backoff_repeat_and_count_bounds():
+    from boltons.iterutils import backoff, backoff_iter
+
+    with pytest.raises(ValueError):
+        backoff(1, 10, count='repeat')
+    with pytest.raises(ValueError):
+        list(backoff_iter(1, 10, count=-1))
+    with pytest.raises(ValueError):
+        list(backoff_iter(1, 10, jitter=2))
+
+    it = backoff_iter(1, 4, count='repeat')
+    assert [next(it) for _ in range(5)] == [1.0, 2.0, 4.0, 4.0, 4.0]
+
+
+def test_unique_returns_list_and_validates():
+    from boltons.iterutils import unique, unique_iter
+
+    assert unique([1, 1, 2, 1, 3]) == [1, 2, 3]
+    assert unique(['a', 'A', 'b'], key=str.lower) == ['a', 'b']
+    with pytest.raises(TypeError):
+        list(unique_iter(1))
+    with pytest.raises(TypeError):
+        list(unique_iter([1, 2], key=3))
+
+
+def test_one():
+    from boltons.iterutils import one
+
+    assert one((True, False, False)) is True
+    assert one((True, False, True)) is None
+    assert one((0, 0, 'a')) == 'a'
+    assert one((0, False, None)) is None
+    assert one((True, True), default=False) is False
+    assert one((10, 20, 30, 42), key=lambda i: i > 40) == 42
+
+
+def test_flatten():
+    from boltons.iterutils import flatten, flatten_iter
+
+    nested = [[1, 2], [[3], [4, 5]]]
+    assert flatten(nested) == [1, 2, 3, 4, 5]
+    assert list(flatten_iter([1, [2, [3]]])) == [1, 2, 3]
+    # strings and bytes are scalars, not flattened into characters
+    assert flatten(['ab', ['cd']]) == ['ab', 'cd']
+    assert flatten([b'ab', [b'cd']]) == [b'ab', b'cd']
+
+
+def test_default_exit_rejects_unexpected_type():
+    from boltons.iterutils import default_exit
+
+    with pytest.raises(RuntimeError):
+        default_exit((), None, None, object(), [])
+
+
+class TestBucketizeCoverage:
+    def test_iterable_and_key_validation(self):
+        from boltons.iterutils import bucketize
+
+        with pytest.raises(TypeError):
+            bucketize(1)
+        # callable key
+        assert bucketize(range(4), lambda x: x % 2) == {0: [0, 2], 1: [1, 3]}
+        with pytest.raises(TypeError):
+            bucketize(range(4), key=1)
+        with pytest.raises(TypeError):
+            bucketize(range(4), value_transform=1)
+
+    def test_string_attribute_key(self):
+        from boltons.iterutils import bucketize
+
+        assert bucketize([1 + 1j, 2 + 2j, 1, 2], key='real') == {
+            1.0: [(1 + 1j), 1], 2.0: [(2 + 2j), 2]}
+
+    def test_key_list_with_transform(self):
+        from boltons.iterutils import bucketize
+
+        grouped = bucketize([1, 2, 365, 4, 98], key=[0, 1, 2, 0, 2],
+                            value_transform=lambda x: x * 10)
+        assert grouped == {0: [10, 40], 1: [20], 2: [3650, 980]}
+        with pytest.raises(ValueError):
+            bucketize([1, 2], key=[0])
+
+
+class TestPartitionCoverage:
+    def test_validation(self):
+        from boltons.iterutils import partition
+
+        with pytest.raises(TypeError):
+            partition(1)
+        with pytest.raises(TypeError):
+            partition([1], key=1)
+
+    def test_string_key(self):
+        from boltons.iterutils import partition
+
+        class Obj:
+            def __init__(self, flag):
+                self.flag = flag
+
+        yes, no = partition([Obj(True), Obj(False)], key='flag')
+        assert [o.flag for o in yes] == [True]
+        assert [o.flag for o in no] == [False]
+
+
+class TestRemapCoverage:
+    def test_argument_validation(self):
+        from boltons.iterutils import remap
+
+        with pytest.raises(TypeError):
+            remap({}, visit=1)
+        with pytest.raises(TypeError):
+            remap({}, enter=1)
+        with pytest.raises(TypeError):
+            remap({}, exit=1)
+        with pytest.raises(TypeError):
+            remap({}, trace=1)
+        with pytest.raises(TypeError):
+            remap({}, bogus=1)
+        with pytest.raises(TypeError):
+            remap({'a': 1}, enter=lambda p, k, v: None)
+
+    def test_trace_output(self, capsys):
+        from boltons.iterutils import remap
+
+        assert remap({'a': 1}, trace=True) == {'a': 1}
+        out = capsys.readouterr().out
+        assert 'remap enter' in out
+        assert 'remap exit' in out
+
+        def visit(path, key, value):
+            return True
+
+        assert remap({'a': 1, 'b': 2}, visit=visit, trace='visit') == {'a': 1, 'b': 2}
+        out = capsys.readouterr().out
+        assert 'remap visit' in out and 'remap visit result' in out
+
+    def test_visit_drop_with_trace(self, capsys):
+        from boltons.iterutils import remap
+
+        def visit(path, key, value):
+            return False if key == 'b' else (key, value)
+
+        assert remap({'a': 1, 'b': 2}, visit=visit, trace='visit') == {'a': 1}
+        assert '<drop>' in capsys.readouterr().out
+
+    def test_reraise_visit(self):
+        from boltons.iterutils import remap
+
+        def bad(path, key, value):
+            raise ValueError('boom')
+
+        with pytest.raises(ValueError):
+            remap({'a': 1}, visit=bad)
+        # suppressed errors keep the original item
+        assert remap({'a': 1}, visit=bad, reraise_visit=False) == {'a': 1}
+
+
+class TestGetPathCoverage:
+    def test_path_access_error_details(self):
+        from boltons.iterutils import PathAccessError, get_path
+
+        with pytest.raises(PathAccessError) as excinfo:
+            get_path({'a': {}}, ('a', 'b'))
+        exc = excinfo.value
+        assert isinstance(exc, (KeyError, IndexError, TypeError))
+        assert exc.seg == 'b'
+        assert exc.path == ('a', 'b')
+        assert 'could not access' in str(exc)
+        assert 'PathAccessError' in repr(exc)
+
+    def test_coercion_and_defaults(self):
+        from boltons.iterutils import PathAccessError, get_path
+
+        # numeric strings index into sequences
+        assert get_path([10, 20, 30], ('1',)) == 20
+        assert get_path([10, 20, 30], '2') == 30
+        # unresolvable indexes and non-indexable parents raise PathAccessError
+        with pytest.raises(PathAccessError):
+            get_path([1, 2], ('x',))
+        with pytest.raises(PathAccessError):
+            get_path(5, ('a',))
+        # a default covers any failure in the path
+        assert get_path({'a': 1}, ('a', 'b'), default='nope') == 'nope'
+
+
+class TestGUIDCoverage:
+    def test_size_validation_and_iter(self):
+        from boltons.iterutils import GUIDerator
+
+        with pytest.raises(ValueError):
+            GUIDerator(size=19)
+        with pytest.raises(ValueError):
+            GUIDerator(size=37)
+        g = GUIDerator()
+        assert iter(g) is g
+
+    def test_fork_reseed(self, monkeypatch):
+        from boltons.iterutils import GUIDerator, SequentialGUIDerator
+
+        for cls in (GUIDerator, SequentialGUIDerator):
+            g = cls()
+            first = next(g)
+            old_pid = g.pid
+            monkeypatch.setattr('boltons.iterutils.os.getpid',
+                                lambda pid=old_pid: pid + 1)
+            second = next(g)
+            assert second != first
+            assert g.pid == old_pid + 1
+            monkeypatch.undo()
+
+
+def test_soft_sorted():
+    from boltons.iterutils import soft_sorted
+
+    assert soft_sorted(['two', 'b', 'one', 'a'],
+                       first=['one', 'two']) == ['one', 'two', 'a', 'b']
+    assert soft_sorted(range(7), first=[6, 15], last=[2, 4],
+                       reverse=True) == [6, 5, 3, 1, 0, 2, 4]
+    assert soft_sorted(['b', 'a', 'c'], last=['c']) == ['a', 'b', 'c']
+
+
+def test_untyped_sorted():
+    from boltons.iterutils import untyped_sorted
+
+    assert untyped_sorted([3, 1, 2]) == [1, 2, 3]
+    assert untyped_sorted(['aaa', 'b'], key=len) == ['b', 'aaa']
+    # mutually unorderable types still produce a list, not a TypeError
+    mixed = untyped_sorted([1, 'a', 2.5])
+    assert len(mixed) == 3
+    assert mixed[-1] == 'a'
+    with pytest.raises(TypeError):
+        untyped_sorted([1, 2], key=5)
+
+
+def test_is_collection():
+    from boltons.iterutils import is_collection
+
+    assert is_collection(range(3)) is True
+    assert is_collection([1, 2]) is True
+    assert is_collection('abc') is False
+    assert is_collection(b'abc') is False
+    assert is_collection(object()) is False
+
+
+class TestSplitCoverage:
+    def test_non_iterable_raises(self):
+        from boltons.iterutils import split_iter
+
+        with pytest.raises(TypeError):
+            list(split_iter(1))
+
+    def test_callable_and_iterable_separators(self):
+        from boltons.iterutils import split
+
+        assert split([1, 2, 3], sep=lambda x: x == 2) == [[1], [3]]
+        assert split([1, 2, 3, 2, 4], sep=[2]) == [[1], [3], [4]]
+
+    def test_maxsplit_stops_splitting(self):
+        from boltons.iterutils import split
+
+        assert split([1, None, 2, None, 3], maxsplit=1) == [[1], [2, None, 3]]
+
+    def test_none_separator_groups(self):
+        from boltons.iterutils import split
+
+        assert split([1, None, None, 2]) == [[1], [2]]
+
+
+def test_chunked_empty_source():
+    from boltons.iterutils import chunked_iter
+
+    assert list(chunked_iter([], 2)) == []
+
+
+def test_frange_empty():
+    from boltons.iterutils import frange
+
+    assert frange(5, 0) == []
+
+
+def test_unique_iter_string_key():
+    from boltons.iterutils import unique_iter
+
+    class Obj:
+        def __init__(self, name):
+            self.name = name
+
+    a, b = Obj('a'), Obj('a')
+    assert list(unique_iter([a, b], key='name')) == [a]
+    # missing attribute falls back to identity
+    assert list(unique_iter(['x', 'y'], key='missing')) == ['x', 'y']
+
+
+def test_redundant_variants():
+    from boltons.iterutils import redundant
+
+    assert redundant([1, 2, 3, 4]) == []
+    assert redundant([1, 2, 2, 3, 3, 3]) == [2, 3]
+    assert redundant([1, 2, 2, 3, 3, 3], groups=True) == [[2, 2], [3, 3, 3]]
+    assert redundant(['hi', 'Hi', 'HI', 'hello'], key=str.lower) == ['Hi']
+
+    class Obj:
+        def __init__(self, name):
+            self.name = name
+
+    one, two, three = Obj('a'), Obj('a'), Obj('b')
+    assert redundant([one, two, three], key='name') == [two]
+    with pytest.raises(TypeError):
+        redundant([1, 2], key=3)
+
+
+def test_same():
+    from boltons.iterutils import same
+
+    assert same([]) is True
+    assert same([1]) is True
+    assert same(['a', 'a', 'a']) is True
+    assert same(range(20)) is False
+    assert same([[], []]) is True
+    assert same([[], []], ref='test') is False
+
+
+def test_default_visit():
+    from boltons.iterutils import default_visit
+
+    assert default_visit((), 'key', 'value') == ('key', 'value')
