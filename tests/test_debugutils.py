@@ -217,3 +217,32 @@ def test_wrap_trace_uses_label():
     wrapped.method()
     assert events[0]['label'] == 'mylabel'
     assert events[0]['obj'] is not None
+
+
+def test_wrap_trace_raise_suppressed_returns_none():
+    class Target:
+        def boom(self):
+            raise ValueError('boom')
+
+    wrapped = debugutils.wrap_trace(
+        Target(), hook=lambda *a, **kw: True, which='boom')
+    assert wrapped.boom() is None
+
+
+def test_wrap_trace_lowercase_class_name():
+    class lowercase:
+        def ping(self):
+            return 'pong'
+
+    wrapped = debugutils.wrap_trace(lowercase(), which='ping')
+    assert type(wrapped).__name__ == 'traced_lowercase'
+    assert wrapped.ping() == 'pong'
+
+
+def test_wrap_trace_class_object_is_not_wrappable():
+    class Target:
+        def method(self):
+            return 1
+
+    with raises(TypeError):
+        debugutils.wrap_trace(Target, which='method')

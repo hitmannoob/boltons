@@ -190,3 +190,119 @@ def test_us_timezone_fromutc_sets_fold():
     assert second.replace(tzinfo=None) == datetime(2011, 11, 6, 1, 30)
     assert second.fold == 1
     assert second.tzname() == 'EST'
+
+
+def test_dt_to_timestamp_aware():
+    assert dt_to_timestamp(datetime(1970, 1, 1, tzinfo=timezone.utc)) == 0.0
+    assert dt_to_timestamp(
+        datetime(1970, 1, 1, 0, 0, 10, tzinfo=timezone.utc)) == 10.0
+
+
+def test_parse_timedelta_valid_and_bad_unit():
+    assert parse_timedelta('2 weeks 1 day') == timedelta(days=15)
+    assert parse_timedelta('-1.5 weeks 3m 20s') == timedelta(
+        days=-11, seconds=43400)
+    with pytest.raises(ValueError):
+        parse_timedelta('5 fortnights')
+
+
+def test_decimal_relative_time_cardinalization():
+    from boltons.timeutils import decimal_relative_time
+
+    now = datetime(2020, 1, 8, 12, 0, 0)
+    assert decimal_relative_time(now - timedelta(days=1), now) == (1.0, 'day')
+    assert decimal_relative_time(now - timedelta(days=2), now) == (2.0, 'days')
+    assert decimal_relative_time(
+        now - timedelta(seconds=5), now, cardinalize=False) == (5.0, 'second')
+
+
+def test_relative_time_future():
+    from boltons.timeutils import relative_time
+
+    now = datetime(2020, 1, 8, 12, 0, 0)
+    assert relative_time(now + timedelta(days=7), now) == '1 week from now'
+
+
+def test_strpdate():
+    from boltons.timeutils import strpdate
+
+    assert strpdate('2016-02-14', '%Y-%m-%d') == date(2016, 2, 14)
+    assert strpdate('20151231 23:59:59',
+                    '%Y%m%d %H:%M:%S') == date(2015, 12, 31)
+
+
+def test_daterange_argument_validation():
+    start = date(2020, 1, 1)
+    with pytest.raises(TypeError):
+        list(daterange('2020-01-01', date(2020, 1, 2)))
+    with pytest.raises(TypeError):
+        list(daterange(start, '2020-01-02'))
+    with pytest.raises(ValueError):
+        list(daterange(start, date(2020, 2, 1), step=(0, 0, 'x')))
+
+
+def test_constant_tzinfo():
+    from boltons.timeutils import ConstantTZInfo
+
+    tz = ConstantTZInfo('Custom', timedelta(hours=2))
+    assert tz.utcoffset(None) == timedelta(hours=2)
+    assert tz.utcoffset_hours == 2.0
+    assert tz.tzname(None) == 'Custom'
+    assert tz.dst(None) == timedelta(0)
+    assert repr(tz) == (
+        "ConstantTZInfo(name='Custom', offset=datetime.timedelta(seconds=7200))")
+
+
+def test_local_tz_methods():
+    import time as time_mod
+    from boltons.timeutils import LocalTZ
+
+    moment = datetime(2020, 6, 1, 12)
+    assert isinstance(LocalTZ.is_dst(moment), bool)
+    assert LocalTZ.utcoffset(moment) in (LocalTZ._std_offset, LocalTZ._dst_offset)
+    assert LocalTZ.dst(moment) in (
+        timedelta(0), LocalTZ._dst_offset - LocalTZ._std_offset)
+    assert LocalTZ.tzname(moment) in time_mod.tzname
+    assert repr(LocalTZ) == 'LocalTZInfo()'
+
+
+def test_us_timezone_dst_rules_by_era():
+    from boltons.timeutils import USTimeZone
+
+    zone = USTimeZone(-5, 'TestZone', 'TST', 'TDT')
+    assert repr(zone) == 'TestZone'
+
+    assert zone._dst_range(1960) == (None, None)
+    old = zone._dst_range(1970)
+    assert (old[0].year, old[0].month, old[1].month) == (1970, 4, 10)
+    mid = zone._dst_range(2000)
+    assert (mid[0].year, mid[0].month, mid[1].month) == (2000, 4, 10)
+    new = zone._dst_range(2011)
+    assert (new[0].month, new[1].month) == (3, 11)
+
+    assert zone.dst(None) == timedelta(0)
+    assert zone.dst(datetime(2011, 7, 1)) == timedelta(0)
+    assert zone.dst(datetime(1960, 6, 1, tzinfo=zone)) == timedelta(0)
+    assert zone.dst(datetime(2011, 7, 1, tzinfo=zone)) == timedelta(hours=1)
+    assert zone.dst(datetime(2011, 1, 1, tzinfo=zone)) == timedelta(0)
+    assert zone.dst(datetime(2011, 3, 13, 2, 30, tzinfo=zone)) == timedelta(0)
+    assert zone.dst(
+        datetime(2011, 3, 13, 2, 30, tzinfo=zone, fold=1)) == timedelta(hours=1)
+
+
+def test_us_timezone_fromutc_edges():
+    from boltons.timeutils import USTimeZone
+
+    zone = USTimeZone(-5, 'TestZone', 'TST', 'TDT')
+    with pytest.raises(ValueError):
+        zone.fromutc(datetime(2011, 7, 1, tzinfo=timezone.utc))
+
+    ancient = zone.fromutc(datetime(1960, 6, 1, tzinfo=zone))
+    assert ancient.tzinfo is zone
+    assert ancient.replace(tzinfo=None) == datetime(1960, 6, 1) + zone.stdoffset
+
+    winter = zone.fromutc(datetime(2011, 1, 15, tzinfo=zone))
+    assert winter.replace(tzinfo=None) == datetime(2011, 1, 15) + zone.stdoffset
+
+    summer = zone.fromutc(datetime(2011, 7, 1, tzinfo=zone))
+    assert summer.replace(tzinfo=None) == datetime(2011, 7, 1) + timedelta(hours=-4)
