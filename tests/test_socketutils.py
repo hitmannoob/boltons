@@ -6,7 +6,10 @@ import threading
 from boltons.socketutils import (BufferedSocket,
                                  NetstringSocket,
                                  ConnectionClosed,
+                                 Error,
+                                 NetstringInvalidSize,
                                  NetstringMessageTooLong,
+                                 NetstringProtocolError,
                                  MessageTooLong,
                                  Timeout)
 
@@ -449,3 +452,284 @@ def test_netstring_read_ns_timeout_covers_payload():
         with pytest.raises(Timeout):
             ns.read_ns(timeout=0.05)
         assert time.time() - start < 2
+
+class _TimeoutSock:
+    "Minimal socket stand-in whose send/recv always time out."
+
+    def gettimeout(self):
+        return None
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def send(self, data):
+        raise socket.timeout()
+
+    def recv(self, size):
+        raise socket.timeout()
+
+    def close(self):
+        pass
+
+
+def test_buffered_socket_constructor_defaults_and_overrides():
+    x, y = socket.socketpair()
+    # socketpair sockets have no timeout set, so the default applies
+    assert x.gettimeout() is None
+    bs = BufferedSocket(x)
+    assert bs.timeout == 10
+    assert bs.maxsize == 32 * 1024
+    assert bs.gettimeout() == 10
+
+    bs = BufferedSocket(x, timeout=None, maxsize=64, recvsize=3)
+    assert bs.gettimeout() is None
+    assert bs.maxsize == 64
+    assert bs._recvsize == 3
+
+    bs.setmaxsize(128)
+    assert bs.maxsize == 128
+    y.close()
+    bs.close()
+
+
+def test_send_and_recv_reject_nonzero_flags():
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x)
+    with pytest.raises(ValueError):
+        bs.recv(1, flags=1)
+    with pytest.raises(ValueError):
+        bs.send(b'data', flags=1)
+    y.close()
+    bs.close()
+
+
+def test_recv_uses_and_splits_internal_buffer():
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x)
+
+    # more buffered bytes than requested: keep the remainder
+    bs.rbuf = b'abcdef'
+    assert bs.recv(2) == b'ab'
+    assert bs.getrecvbuffer() == b'cdef'
+
+    # buffer smaller than requested but non-empty: drain it, don't block
+    assert bs.recv(100) == b'cdef'
+    assert bs.getrecvbuffer() == b''
+
+    # an oversize socket recv is split over calls
+    y.sendall(b'0123456789')
+    assert bs.recv_size(3) == b'012'
+    assert bs.getrecvbuffer() == b'3456789'
+    assert bs.recv(4) == b'3456'
+    assert bs.recv(3) == b'789'
+
+    y.close()
+    bs.close()
+
+
+def test_recv_size_buffers_extra_and_honors_recvsize():
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x, recvsize=4)
+    y.sendall(b'hello')
+    assert bs.recv_size(2) == b'he'
+    assert bs.getrecvbuffer() == b'll'
+    assert bs.recv_size(3) == b'llo'
+
+    y.close()
+    bs.close()
+
+
+def test_peek_retains_bytes():
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x)
+    y.sendall(b'ping-pong')
+
+    assert bs.peek(4) == b'ping'
+    assert bs.getrecvbuffer() == b'ping-pong'
+    assert bs.peek(2) == b'pi'
+    assert bs.getrecvbuffer() == b'ping-pong'
+    assert bs.recv_size(4) == b'ping'
+    assert bs.getrecvbuffer() == b'-pong'
+
+    y.close()
+    bs.close()
+
+
+def test_recv_close_defaults_and_too_long():
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x)
+    y.sendall(b'tail')
+    y.close()
+    # default maxsize path, connection closes so everything is returned
+    assert bs.recv_close() == b'tail'
+    bs.close()
+
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x)
+    y.sendall(b'abcde')
+    with pytest.raises(MessageTooLong) as exc:
+        bs.recv_close(maxsize=3)
+    assert '3 bytes read' in str(exc.value)
+    # all received bytes stay buffered, nothing is lost
+    assert bs.getrecvbuffer() == b'abcde'
+    y.close()
+    bs.close()
+
+
+def test_send_buffers_and_reports_bytes_sent():
+    x, y = socket.socketpair()
+    bx, by = BufferedSocket(x), BufferedSocket(y)
+    by.buffer(b'foo')
+    by.buffer(b'bar')
+    assert by.getsendbuffer() == b'foobar'
+    assert by.send(b'baz') == 9
+    assert by.getsendbuffer() == b''
+    assert bx.recv_size(9) == b'foobarbaz'
+
+    # sendall is a passthrough
+    by.sendall(b'!')
+    assert bx.recv_size(1) == b'!'
+    bx.close()
+    by.close()
+
+
+def test_send_and_recv_timeout_errors():
+    bs = BufferedSocket(_TimeoutSock())
+    with pytest.raises(Timeout) as exc:
+        bs.send(b'abc')
+    assert '3 bytes unsent' in str(exc.value)
+
+    with pytest.raises(Timeout):
+        bs.recv(1)
+
+    with pytest.raises(Timeout):
+        bs.recv_size(1)
+
+
+def test_socket_option_passthroughs():
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x)
+    assert bs.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) == \
+        x.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+    bs.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    assert x.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) == \
+        bs.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+    y.close()
+    bs.close()
+
+
+def test_netstring_socket_accessors():
+    x, y = socket.socketpair()
+    ns = NetstringSocket(x)
+    assert ns.fileno() == x.fileno()
+    ns.settimeout(0.5)
+    assert ns.timeout == 0.5
+    ns.setmaxsize(1024)
+    assert ns.maxsize == 1024
+    assert ns._msgsize_maxsize == len('1024') + 1
+    assert ns._calc_msgsize_maxsize(99) == 3
+    y.close()
+    ns.bsock.close()
+
+
+def test_netstring_read_ns_with_explicit_maxsize():
+    x, y = socket.socketpair()
+    ns = NetstringSocket(x)
+    y.sendall(b'3:abc,')
+    assert ns.read_ns(maxsize=10) == b'abc'
+    y.close()
+    ns.bsock.close()
+
+
+def test_netstring_invalid_size_prefix():
+    x, y = socket.socketpair()
+    ns = NetstringSocket(x)
+    y.sendall(b'zz:abc,')
+    with pytest.raises(NetstringInvalidSize) as exc:
+        ns.read_ns()
+    assert 'must be valid integer' in str(exc.value)
+    y.close()
+    ns.bsock.close()
+
+
+def test_netstring_message_too_long_on_read_and_write():
+    x, y = socket.socketpair()
+    ns = NetstringSocket(x)
+    y.sendall(b'999:')
+    with pytest.raises(NetstringMessageTooLong) as exc:
+        ns.read_ns(maxsize=100)
+    assert '999 > 100' in str(exc.value)
+    y.close()
+    ns.bsock.close()
+
+    x, y = socket.socketpair()
+    ns = NetstringSocket(x, maxsize=3)
+    with pytest.raises(NetstringMessageTooLong) as exc:
+        ns.write_ns(b'abcd')
+    assert '4 > 3' in str(exc.value)
+    y.close()
+    ns.bsock.close()
+
+
+def test_netstring_missing_trailing_comma():
+    x, y = socket.socketpair()
+    ns = NetstringSocket(x)
+    y.sendall(b'3:abcX')
+    with pytest.raises(NetstringProtocolError) as exc:
+        ns.read_ns()
+    assert "expected trailing ','" in str(exc.value)
+    y.close()
+    ns.bsock.close()
+
+
+def test_error_hierarchy_and_messages():
+    assert issubclass(Error, socket.error)
+    assert issubclass(ConnectionClosed, Error)
+    assert issubclass(MessageTooLong, Error)
+    assert issubclass(Timeout, socket.timeout)
+    assert issubclass(NetstringProtocolError, Error)
+    assert issubclass(NetstringInvalidSize, NetstringProtocolError)
+    assert issubclass(NetstringMessageTooLong, NetstringProtocolError)
+
+    assert str(MessageTooLong()) == 'message exceeded maximum size'
+    msg = str(MessageTooLong(3, b'\n'))
+    assert '3 bytes read' in msg
+    assert "Delimiter not found: b'\\n'" in msg
+
+    msg = str(Timeout(1.5, 'more'))
+    assert 'socket operation timed out' in msg
+    assert '1500.0ms' in msg
+    assert msg.endswith('more')
+
+    assert str(NetstringInvalidSize('bad')) == 'bad'
+
+
+def test_recv_splits_single_oversize_socket_read():
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x)
+    y.sendall(b'abcdef')
+    assert bs.recv(2) == b'ab'
+    assert bs.getrecvbuffer() == b'cdef'
+    y.close()
+    bs.close()
+
+
+def test_flush_sends_buffered_data():
+    x, y = socket.socketpair()
+    bx, by = BufferedSocket(x), BufferedSocket(y)
+    by.buffer(b'held')
+    assert by.getsendbuffer() == b'held'
+    assert by.flush() is None
+    assert by.getsendbuffer() == b''
+    assert bx.recv_size(4) == b'held'
+    bx.close()
+    by.close()
+
+
+def test_getsockopt_with_buflen():
+    x, y = socket.socketpair()
+    bs = BufferedSocket(x)
+    expected = x.getsockopt(socket.SOL_SOCKET, socket.SO_LINGER, 8)
+    assert bs.getsockopt(socket.SOL_SOCKET, socket.SO_LINGER, 8) == expected
+    y.close()
+    bs.close()
