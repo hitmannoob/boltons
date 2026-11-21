@@ -139,3 +139,72 @@ def test_parsed_exc_multiline_source():
     indented = ParsedException.from_string(
         '\n'.join('    ' + line for line in _MULTILINE_TB_STR.splitlines()))
     assert indented.frames == parsed_tb.frames
+
+def test_parsed_exc_source_file_and_dict():
+    parsed = ParsedException('ValueError', 'bad', [{'filepath': 'a.py', 'lineno': '1',
+                                                    'funcname': 'f', 'source_line': ''}])
+    assert parsed.source_file == 'a.py'
+    assert parsed.to_dict() == {'exc_type': 'ValueError', 'exc_msg': 'bad',
+                                'frames': parsed.frames}
+    assert repr(parsed).startswith("ParsedException('ValueError', 'bad', frames=")
+
+    empty = ParsedException('KeyError', '')
+    assert empty.source_file is None
+    assert empty.frames == []
+
+
+def test_parsed_exc_accepts_bytes():
+    tb = (b'Traceback (most recent call last):\n'
+          b'  File "b.py", line 3, in run\n'
+          b'    boom()\n'
+          b'RuntimeError: kaboom')
+    parsed = ParsedException.from_string(tb)
+    assert parsed.exc_type == 'RuntimeError'
+    assert parsed.exc_msg == 'kaboom'
+    assert parsed.frames == [{'source_line': 'boom()', 'filepath': 'b.py',
+                              'lineno': '3', 'funcname': 'run'}]
+
+
+def test_parsed_exc_ignores_trailing_ignored_exception():
+    tb = ('Traceback (most recent call last):\n'
+          '  File "c.py", line 1, in <module>\n'
+          '    fail()\n'
+          'OSError: disk on fire\n'
+          'Exception ignored')
+    parsed = ParsedException.from_string(tb)
+    assert parsed.exc_type == 'OSError'
+    assert parsed.exc_msg == 'disk on fire'
+    assert len(parsed.frames) == 1
+
+
+def test_parsed_exc_syntax_error_format():
+    tb = ('  File "syntax.py", line 1\n'
+          '    def broken(\n'
+          '              ^\n'
+          'SyntaxError: invalid syntax')
+    parsed = ParsedException.from_string(tb)
+    assert parsed.exc_type == 'SyntaxError'
+    assert parsed.exc_msg == 'invalid syntax'
+    assert parsed.frames == [{'source_line': 'def broken(',
+                              'source_line_anchor': '          ^',
+                              'filepath': 'syntax.py',
+                              'lineno': '1'}]
+
+
+def test_parsed_exc_unrecognized_raises():
+    try:
+        ParsedException.from_string('not a traceback at all')
+    except ValueError as e:
+        assert 'unrecognized traceback' in str(e)
+    else:
+        raise AssertionError('expected ValueError')
+
+
+def test_parsed_exc_frame_without_following_line():
+    tb = ('Traceback (most recent call last):\n'
+          '  File "only.py", line 5, in last')
+    parsed = ParsedException.from_string(tb)
+    assert parsed.frames == [{'source_line': '', 'filepath': 'only.py',
+                              'lineno': '5', 'funcname': 'last'}]
+    assert parsed.exc_type == ''
+    assert parsed.exc_msg == ''
