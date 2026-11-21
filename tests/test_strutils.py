@@ -443,3 +443,226 @@ def test_args2cmd_sep():
     assert strutils.args2cmd(['aa', 'bb']) == 'aa bb'
     assert strutils.args2cmd(['aa', 'bb'], sep='|') == 'aa|bb'
     assert strutils.args2cmd(['a a', 'bb'], sep='|') == '"a a"|bb'
+
+
+def test_camel2under():
+    assert strutils.camel2under('BasicParseTest') == 'basic_parse_test'
+    assert strutils.camel2under('already_under') == 'already_under'
+    assert strutils.camel2under('HTMLParser') == 'html_parser'
+
+
+def test_under2camel():
+    assert strutils.under2camel('complex_tokenizer') == 'ComplexTokenizer'
+    assert strutils.under2camel('alreadyCamel') == 'Alreadycamel'
+    # empty segments are dropped
+    assert strutils.under2camel('a__b') == 'A_B'
+
+
+def test_slugify_ascii_flag():
+    assert strutils.slugify("Kurt Gödel's pretty cool.", ascii=True) == \
+        b'kurt_goedel_s_pretty_cool'
+    assert strutils.slugify('abc', lower=False) == 'abc'
+    assert strutils.slugify('') == ''
+
+
+def test_unit_len_and_cardinalize():
+    assert strutils.unit_len(range(10), 'number') == '10 numbers'
+    assert strutils.unit_len('aeiou', 'vowel') == '5 vowels'
+    assert strutils.unit_len([], 'worry') == 'No worries'
+    assert strutils.cardinalize('wish', 1) == 'wish'
+    assert strutils.cardinalize('wish', 2) == 'wishes'
+
+
+def test_ordinalize():
+    o = strutils.ordinalize
+    assert o(1) == '1st'
+    assert o(2) == '2nd'
+    assert o(3) == '3rd'
+    assert o(4) == '4th'
+    # teens all take 'th', even though they end in 1/2/3
+    assert o(11) == '11th'
+    assert o(12) == '12th'
+    assert o(13) == '13th'
+    # single digits hit the IndexError fallback
+    assert o(21) == '21st'
+    assert o(22) == '22nd'
+    assert o(23) == '23rd'
+    assert o(1515) == '1515th'
+    # non-numeric input is returned unchanged
+    assert o('hi') == 'hi'
+    assert o('') == ''
+    # ext_only returns just the suffix
+    assert o(22, ext_only=True) == 'nd'
+    assert o(4, ext_only=True) == 'th'
+    assert o('hi', ext_only=True) == ''
+
+
+def test_singularize_branches():
+    s = strutils.singularize
+    # input already singular (present in the singular->plural map)
+    assert s('sheep') == 'sheep'
+    # no trailing 's' at all
+    assert s('dog') == 'dog'
+    # two-letter word
+    assert s('as') == 'a'
+    # consonant + 'ies' -> 'y'
+    assert s('cities') == 'city'
+    assert s('Activities') == 'Activity'
+    # plain trailing 's'
+    assert s('cats') == 'cat'
+    # irregular plural
+    assert s('FEET') == 'FOOT'
+    assert s('') == ''
+
+
+def test_pluralize_branches():
+    p = strutils.pluralize
+    # already an irregular plural
+    assert p('sheep') == 'sheep'
+    assert p('series') == 'series'
+    # consonant + 'y' -> 'ies'
+    assert p('enemy') == 'enemies'
+    # sibilant endings take 'es'
+    assert p('box') == 'boxes'
+    assert p('watch') == 'watches'
+    assert p('dish') == 'dishes'
+    # already ending in 'es' is not doubled
+    assert p('boxes') == 'boxes'
+    # regular word
+    assert p('dog') == 'dogs'
+    # mixed case is preserved as-is when no simple pattern applies
+    assert p('iPhone') == 'iphones'
+    assert p('') == ''
+
+
+def test_match_case_helper():
+    # blank master falls back to the disciple unchanged
+    assert strutils._match_case('  ', 'X') == 'X'
+    assert strutils._match_case('dog', 'CATS') == 'cats'
+    assert strutils._match_case('DOG', 'cats') == 'CATS'
+    assert strutils._match_case('Dog', 'cats') == 'Cats'
+    assert strutils._match_case('DoG', 'cats') == 'cats'
+
+
+def test_find_hashtags():
+    assert strutils.find_hashtags('#atag http://asite/#ananchor') == ['atag']
+    assert strutils.find_hashtags(u'#肯德基 and ＃ｆｕｌｌ') == ['肯德基', 'ｆｕｌｌ']
+    assert strutils.find_hashtags('no tags here') == []
+
+
+def test_a10n():
+    assert strutils.a10n('abbreviation') == 'a10n'
+    assert strutils.a10n('internationalization') == 'i18n'
+    # strings shorter than three characters are returned unchanged
+    assert strutils.a10n('ab') == 'ab'
+    assert strutils.a10n('') == ''
+
+
+def test_asciify_ignore():
+    assert strutils.asciify('a\u2603b', ignore=True) == b'ab'
+    assert strutils.asciify('a\u2603b') == b'a?b'
+    # a character without a precomputed mapping is deaccented on demand
+    assert strutils.asciify('\u00f1') == b'n'
+
+
+def test_is_ascii():
+    assert strutils.is_ascii('Beyonce') is True
+    assert strutils.is_ascii('Beyonc\u00e9') is False
+    assert strutils.is_ascii(b'plain') is True
+    assert strutils.is_ascii(b'\xff') is False
+    with pytest.raises(ValueError):
+        strutils.is_ascii(123)
+
+
+def test_html_text_extractor_handlers():
+    ex = strutils.HTMLTextExtractor()
+    ex.handle_charref('x41')
+    ex.handle_charref('66')
+    assert ex.get_text() == 'AB'
+
+    ex = strutils.HTMLTextExtractor()
+    ex.handle_entityref('amp')
+    ex.handle_entityref('notarealentity')
+    assert ex.get_text() == '&&notarealentity;'
+
+
+def test_escape_shell_args_styles():
+    args = ['a a']
+    assert strutils.escape_shell_args(args) == "'a a'"
+    assert strutils.escape_shell_args(args, style='sh') == "'a a'"
+    assert strutils.escape_shell_args(args, style='cmd') == '"a a"'
+    assert strutils.escape_shell_args(['aa', 'bb'], style='cmd', sep='|') == \
+        'aa|bb'
+    with pytest.raises(ValueError):
+        strutils.escape_shell_args(['x'], style='bogus')
+
+
+def test_args2sh_empty_argument():
+    assert strutils.args2sh(['', 'aa']) == "'' aa"
+    assert strutils.args2sh(['aa', '']) == "aa ''"
+
+
+def test_args2cmd_backslashes():
+    assert strutils.args2cmd(['\\']) == '\\'
+    assert strutils.args2cmd(['a\\b']) == 'a\\b'
+    # a backslash before a double quote becomes escaped backslashes
+    assert strutils.args2cmd(['a\\"b']) == 'a\\\\\\"b'
+    assert strutils.args2cmd(['q"z']) == 'q\\"z'
+    assert strutils.args2cmd(['a b', '\\', 'x\\y', 'q"z']) == \
+        '"a b" \\ x\\y q\\"z'
+
+
+def test_format_int_list_repeated_and_spacing():
+    # repeated values are skipped without breaking the ranges
+    assert strutils.format_int_list([1, 1, 2, 2, 3]) == '1-3'
+    assert strutils.format_int_list([1, 2, 2]) == '1-2'
+    assert strutils.format_int_list([3, 1, 2, 2]) == '1-3'
+    assert strutils.format_int_list([1, 3, 5], delim_space=True) == '1, 3, 5'
+
+
+def test_complement_int_list():
+    c = strutils.complement_int_list
+    assert c('1,3,5-8,10-11,15') == '0,2,4,9,12-14'
+    assert c('1,3,5-8,10-11,15', range_start=3) == '4,9,12-14'
+    assert c('1,3,5-8,10-11,15', range_end=20) == '0,2,4,9,12-14,16-19'
+    assert c('1,3,5-8,10-11,15', range_end=0) == ''
+    assert c('') == ''
+    assert c('1,3,5-8', range_start=2, range_end=3) == '2'
+
+
+def test_int_ranges_from_int_list():
+    r = strutils.int_ranges_from_int_list
+    assert r('1,3,5-8,10-11,15') == \
+        ((1, 1), (3, 3), (5, 8), (10, 11), (15, 15))
+    assert r('1') == ((1, 1),)
+    assert r('') == ()
+    assert r('1-3,7') == ((1, 3), (7, 7))
+
+
+def test_unwrap_text():
+    text = "Short \n lines  \nwrapped\nsmall.\n\nAnother\nparagraph."
+    assert strutils.unwrap_text(text) == \
+        'Short lines wrapped small.\n\nAnother paragraph.'
+    assert strutils.unwrap_text(text, ending=' | ') == \
+        'Short lines wrapped small. | Another paragraph.'
+    assert strutils.unwrap_text(text, ending=None) == \
+        ['Short lines wrapped small.', 'Another paragraph.']
+    assert strutils.unwrap_text('') == ''
+    assert strutils.unwrap_text('a\n\nb') == 'a\n\nb'
+
+
+def test_ellipsize_punctuation_and_hardcut():
+    e = strutils.ellipsize
+    # a sentence-ending period at the cut is stripped
+    assert e('hello world. next sentence here', 14) == 'hello world\u2026'
+    # a cut where every trailing character is punctuation hard-cuts
+    assert e('hello , ; : ! ? world', 10) == 'hello\u2026'
+    assert len(e('hello , ; : ! ? world', 10)) <= 10
+    assert e('! ! ! x', 6) == '! ! !\u2026'
+
+
+def test_removeprefix():
+    assert strutils.removeprefix('foobar', 'foo') == 'bar'
+    assert strutils.removeprefix('foobar', 'bar') == 'foobar'
+    assert strutils.removeprefix('foobar', '') == 'foobar'
+    assert strutils.removeprefix('', 'foo') == ''

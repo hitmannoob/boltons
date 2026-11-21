@@ -113,3 +113,207 @@ def test_to_html_bottom_metadata_after_table():
     assert main_close < html.index('<br />') < html.index('<th>k</th>')
     assert html.endswith('</table>')
     assert html.count('<table>') == html.count('</table>') == 2
+
+from collections import namedtuple
+
+import pytest
+
+from boltons.tableutils import (Table, InputType, ListInputType,
+                                TupleInputType, NamedTupleInputType,
+                                ObjectInputType, UnsupportedData,
+                                escape_html, to_text)
+
+
+class _BadStr:
+    def __str__(self):
+        raise ValueError('no str')
+
+    def __repr__(self):
+        return 'REPR_FALLBACK'
+
+
+class _BadStrAndRepr:
+    def __str__(self):
+        raise ValueError('no str')
+
+    def __repr__(self):
+        raise ValueError('no repr')
+
+
+class _BadProperty:
+    def __init__(self):
+        self.visible = 3
+
+    @property
+    def broken(self):
+        raise AttributeError('property blows up')
+
+
+def test_to_text_uses_str():
+    assert to_text(12) == '12'
+
+
+def test_to_text_falls_back_to_repr():
+    assert to_text(_BadStr()) == 'REPR_FALLBACK'
+
+
+def test_to_text_falls_back_to_object_repr():
+    text = to_text(_BadStrAndRepr())
+    assert text.startswith('<') and '_BadStrAndRepr' in text
+
+
+def test_to_text_maxlen_truncates():
+    assert to_text('abcdef', maxlen=5) == 'ab...'
+    assert to_text('abc', maxlen=5) == 'abc'
+    assert escape_html('a&b') == 'a&amp;b'
+
+
+def test_input_type_default_get_entry_seq():
+    class EchoInput(InputType):
+        def get_entry(self, entry, headers):
+            return list(entry)
+
+    assert EchoInput().get_entry_seq([[1, 2], [3]], None) == [[1, 2], [3]]
+
+
+def test_list_input_type_guess_headers_is_none():
+    assert ListInputType().guess_headers([1, 2]) is None
+
+
+def test_tuple_input_type():
+    tit = TupleInputType()
+    assert tit.check_type((1, 2))
+    assert not tit.check_type([1, 2])
+    assert tit.guess_headers((1, 2)) is None
+    assert tit.get_entry((1, 2), None) == [1, 2]
+
+    t = Table.from_data(((1, 2), (3, 4)))
+    assert t.headers == []
+    assert t._data == [[1, 2], [3, 4]]
+
+
+def test_namedtuple_input_type():
+    Point = namedtuple('Point', 'x y')
+    p = Point(1, 2)
+    nit = NamedTupleInputType()
+    assert nit.check_type(p)
+    assert nit.guess_headers(p) == ['x', 'y']
+    assert nit.get_entry(p, ['x', 'y', 'z']) == [1, 2, None]
+
+    t = Table.from_data([p])
+    assert t.headers == ['x', 'y']
+    assert t[0] == [1, 2]
+
+
+def test_object_input_type_skips_raising_and_callables():
+    obj = _BadProperty()
+    oit = ObjectInputType()
+    assert oit.check_type(obj)
+    headers = oit.guess_headers(obj)
+    assert 'visible' in headers
+    assert 'broken' not in headers
+    assert 'broken' not in headers  # raising property skipped
+
+    t = Table.from_object(obj, headers=['visible', 'missing'])
+    assert t[0] == [3, None]
+
+
+def test_from_list_and_from_object():
+    t = Table.from_list([[1, 2], [3, 4]])
+    assert t.headers == []
+    assert t[1] == [3, 4]
+
+    t = Table.from_list([[1, 2]], headers=['a', 'b'])
+    assert t.headers == ['a', 'b']
+    assert t.to_text().splitlines()[0] == 'a | b'
+
+    obj = _BadProperty()
+    t = Table.from_object(obj, headers=['visible'])
+    assert t[0] == [3]
+
+
+def test_from_data_max_depth_zero_is_empty():
+    t = Table.from_data([[1, 2]], headers=['a', 'b'], max_depth=0)
+    assert len(t) == 0
+    assert t.headers == ['a', 'b']
+
+
+def test_from_data_empty_sequence():
+    t = Table.from_data([])
+    assert len(t) == 0
+    t = Table.from_data([], headers=['a'])
+    assert t.headers == ['a']
+    assert len(t) == 0
+
+
+def test_from_data_rewinds_when_first_element_unsupported():
+    # first element is a DNR scalar (str), so Table falls back to
+    # treating the whole list as the data sequence
+    t = Table.from_data(['abc'])
+    assert len(t) == 1
+    assert t[0] == ['abc']
+    assert t._width == 1
+
+
+def test_from_data_scalar():
+    t = Table.from_data(42)
+    assert t.headers == [42]
+
+
+def test_from_data_unsupported_raises():
+    with pytest.raises(UnsupportedData):
+        Table.from_data('abc')
+
+
+def test_from_data_nested_tables():
+    t = Table.from_data([[[1, 2]], [[3, 4]]], max_depth=2)
+    assert isinstance(t[0][0], Table)
+    assert t[0][0][0] == [1, 2]
+    assert isinstance(t[1][0], Table)
+    assert t[1][0][0] == [3, 4]
+
+
+def test_getitem_and_repr():
+    t = Table([[1, 2]], headers=None)
+    assert t[0] == [1, 2]
+    assert repr(t) == 'Table([[1, 2]])'
+    t2 = Table([[1, 2]], headers=['a', 'b'])
+    assert repr(t2) == "Table(headers=['a', 'b'], data=[[1, 2]])"
+
+
+def test_extend_empty_is_noop():
+    t = Table([[1]], headers=[])
+    t.extend([])
+    t.extend(None)
+    assert t._data == [[1]]
+
+
+def test_to_html_metadata_on_top():
+    t = Table([[1, 2]], headers=['a', 'b'], metadata={'k': 'v'})
+    html = t.to_html(with_metadata=True)
+    assert html.count('<table>') == 2
+    assert html.index('</table>') < html.index('<br />')
+    assert '<th>k</th>' in html
+
+
+def test_to_html_bad_orientation():
+    t = Table([[1, 2]])
+    with pytest.raises(ValueError):
+        t.to_html(orientation='sideways')
+
+
+def test_to_html_nested_horizontal():
+    inner = Table([[1, 2]], headers=['a', 'b'])
+    outer = Table([[inner, 'x'], ['y', 'z']], headers=['n', 'v'])
+    html = outer.to_html(max_depth=2)
+    assert html.count('<table>') == 2
+    assert '<th>a</th>' in html
+
+
+def test_to_html_nested_vertical():
+    inner = Table([[1, 2]], headers=['a', 'b'])
+    outer = Table([[inner, 'x']], headers=['n', 'v'])
+    html = outer.to_html(orientation='v', max_depth=2)
+    assert html.count('<table>') == 2
+    assert '<th>a</th>' in html
+    assert '<th>n</th>' in html and '<th>v</th>' in html

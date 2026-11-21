@@ -556,3 +556,345 @@ def test_unicodey():
 
 def test_str_repr():
     assert str(URL("http://googlewebsite.com/e-shops.aspx")) == "http://googlewebsite.com/e-shops.aspx"
+
+
+def test_quote_part_non_full_quote():
+    assert urlutils.quote_path_part('a b/c?d', full_quote=False) == 'a b%2Fc%3Fd'
+    assert urlutils.quote_query_part('a b&c=d', full_quote=False) == 'a b%26c%3Dd'
+    assert urlutils.quote_fragment_part('x y#z', full_quote=False) == 'x y%23z'
+    assert urlutils.quote_userinfo_part('u ser@:x', full_quote=False) == 'u ser%40%3Ax'
+
+
+def test_quote_part_full_quote():
+    assert urlutils.quote_path_part('a b') == 'a%20b'
+    assert urlutils.quote_query_part('a&b') == 'a%26b'
+    assert urlutils.quote_fragment_part('a#b') == 'a%23b'
+    assert urlutils.quote_userinfo_part('a@b') == 'a%40b'
+
+
+def test_unquote_defaults_and_errors():
+    assert urlutils.unquote('abc%20def') == 'abc def'
+    assert urlutils.unquote('%E9', encoding=None) == '\ufffd'
+    assert urlutils.unquote('%E9', errors=None) == '\ufffd'
+    assert urlutils.unquote('no-escapes') == 'no-escapes'
+
+
+def test_unquote_to_bytes_edges():
+    assert urlutils.unquote_to_bytes('') == b''
+    assert urlutils.unquote_to_bytes('abc') == b'abc'
+    assert urlutils.unquote_to_bytes('a%20b') == b'a b'
+    assert urlutils.unquote_to_bytes('abc%zzdef') == b'abc%zzdef'
+
+
+def test_to_unicode_falls_back_to_decoding():
+    class UndecodableStr(bytes):
+        def __str__(self):
+            raise UnicodeDecodeError('utf8', b'x', 0, 1, 'boom')
+
+    assert urlutils.to_unicode(UndecodableStr(b'hi')) == 'hi'
+    assert urlutils.to_unicode(5) == '5'
+
+
+def test_register_scheme_validation():
+    with pytest.raises(ValueError):
+        urlutils.register_scheme('boltons-bad-port', default_port='notaport')
+    with pytest.raises(ValueError):
+        urlutils.register_scheme('boltons-bad-netloc', uses_netloc=False,
+                                 default_port=80)
+    with pytest.raises(ValueError):
+        urlutils.register_scheme('boltons-bad-flag', uses_netloc='yes')
+
+    assert urlutils.register_scheme('boltons-noop') is None
+    assert 'boltons-noop' not in urlutils.SCHEME_PORT_MAP
+
+
+def test_cachedproperty_class_access_and_repr():
+    descriptor = URL.__dict__['query_params']
+    assert descriptor.__get__(None) is descriptor
+    assert repr(descriptor).startswith('<cachedproperty func=')
+
+    url = URL('http://example.com/?a=1')
+    assert url.query_params is url.query_params
+    del url.__dict__['query_params']
+    assert url.query_params == {'a': '1'}
+
+
+def test_url_from_invalid_utf8_bytes():
+    with pytest.raises(urlutils.URLParseError):
+        URL(b'http://\xff.example.com')
+
+
+def test_default_port_plus_heuristic():
+    assert URL('http://example.com').default_port == 80
+    assert URL('git+ftp://example.com/x').default_port == 21
+    assert URL('unknownscheme://example.com').default_port is None
+
+
+def test_url_repr_str_and_unicode():
+    url = URL('http://example.com/a?b=1#c')
+    assert repr(url) == "URL('http://example.com/a?b=1#c')"
+    assert str(url) == 'http://example.com/a?b=1#c'
+    assert url.__unicode__() == 'http://example.com/a?b=1#c'
+
+
+def test_find_all_links_text_merging():
+    assert find_all_links('http://a.com tail', schemes=['https'],
+                          with_text=True) == ['http://a.com tail']
+    assert find_all_links('see www.example.com now', default_scheme=False,
+                          with_text=True) == ['see www.example.com now']
+    tokens = find_all_links('visit http://x.com:bad/p now', with_text=True)
+    assert tokens == ['visit http://x.com:bad/p now']
+
+    tokens = find_all_links('http://a.com and https://b.com', schemes=['https'],
+                            with_text=True)
+    assert tokens[0] == 'http://a.com'
+    assert tokens[1] == ' and '
+    assert tokens[2] == URL('https://b.com')
+
+
+def test_parse_qsl_keep_blank_values():
+    assert urlutils.parse_qsl('a=&b=2') == [('a', None), ('b', '2')]
+    assert urlutils.parse_qsl('a=&b=2', keep_blank_values=False) == [('b', '2')]
+    assert urlutils.parse_qsl('&&') == []
+
+
+def test_parse_host_and_port_edges():
+    import socket as socket_module
+
+    assert urlutils.parse_host('') == (None, '')
+    assert urlutils.parse_host('example.com') == (None, 'example.com')
+    assert urlutils.parse_host('192.168.1.1') == (
+        socket_module.AF_INET, '192.168.1.1')
+    assert urlutils.parse_host('[::1]') == (socket_module.AF_INET6, '::1')
+    with pytest.raises(urlutils.URLParseError):
+        urlutils.parse_host('[zz::1]')
+
+    assert urlutils.parse_url('http://example.com:')['port'] is None
+    assert urlutils.parse_url('http://example.com:8080/x')['port'] == 8080
+    ipv6 = urlutils.parse_url('http://[::1]:8080/x')
+    assert ipv6['host'] == '::1'
+    assert ipv6['port'] == 8080
+    assert ipv6['family'] == socket_module.AF_INET6
+
+
+def test_get_authority_variants():
+    url = URL('ftp://user:pass@ftp.debian.org:2121/debian/README')
+    assert url.get_authority() == 'ftp.debian.org:2121'
+    assert url.get_authority(with_userinfo=True) == 'user:pass@ftp.debian.org:2121'
+    assert URL('http://bücher.ch').get_authority(full_quote=True) == 'xn--bcher-kva.ch'
+
+
+def test_to_text_composition():
+    assert URL().to_text() == ''
+    assert URL.from_parts(scheme='http').to_text() == 'http://'
+    assert URL.from_parts(scheme='http', path_parts=('', 'x')).to_text() == 'http:///x'
+    assert URL.from_parts(path_parts=('a', 'b')).to_text() == 'a/b'
+    assert URL.from_parts(fragment='a b#c').to_text(full_quote=False) == '#a b%23c'
+
+
+def _load_fallback_urlutils():
+    import importlib.util
+    import sys
+
+    from boltons import urlutils as real_urlutils
+    name = 'boltons._urlutils_fallback_under_test'
+    spec = importlib.util.spec_from_file_location(name, real_urlutils.__file__)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    blocked = ('boltons.dictutils', 'boltons.typeutils')
+    saved = {n: sys.modules.get(n) for n in blocked}
+    for n in blocked:
+        sys.modules[n] = None
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        for n, value in saved.items():
+            if value is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = value
+    return mod
+
+
+@pytest.fixture(scope='module')
+def fallback_urlutils():
+    return _load_fallback_urlutils()
+
+
+def test_fallback_omd_basic(fallback_urlutils):
+    OMD = fallback_urlutils.OrderedMultiDict
+    omd = OMD([('a', 1), ('b', 2), ('a', 3)])
+    assert omd['a'] == 3
+    assert omd.get('a') == 3
+    assert omd.get('missing') is None
+    assert omd.get('missing', 9) == 9
+    assert omd.getlist('a') == [1, 3]
+    assert omd.getlist('missing') == []
+    assert omd.getlist('missing', ['d']) == ['d']
+    assert omd.keys() == ['a', 'b']
+    assert omd.keys(multi=True) == ['a', 'b', 'a']
+    assert omd.values() == [3, 2]
+    assert omd.values(multi=True) == [1, 2, 3]
+    assert omd.items() == [('a', 3), ('b', 2)]
+    assert omd.items(multi=True) == [('a', 1), ('b', 2), ('a', 3)]
+    assert list(omd) == ['a', 'b']
+    assert list(reversed(omd)) == ['b', 'a']
+    assert omd.todict() == {'a': 3, 'b': 2}
+    assert omd.todict(multi=True) == {'a': [1, 3], 'b': [2]}
+    assert omd.counts().todict() == {'a': 2, 'b': 1}
+    assert repr(omd) == "OrderedMultiDict([('a', 1), ('b', 2), ('a', 3)])"
+    assert OMD([(0, 2), (1, 2)]).inverted().getlist(2) == [0, 1]
+    assert OMD(b=2)['b'] == 2
+
+
+def test_fallback_omd_mutation(fallback_urlutils):
+    OMD = fallback_urlutils.OrderedMultiDict
+    omd = OMD()
+    omd.add('a', 1)
+    omd.addlist('a', [2, 3])
+    omd.addlist('b', iter([4, 5]))
+    omd.addlist('empty', [])
+    assert omd.getlist('a') == [1, 2, 3]
+    assert omd.getlist('b') == [4, 5]
+    assert 'empty' not in omd
+
+    assert omd.setdefault('c') is None
+    assert omd['c'] is None
+    assert omd.setdefault('d', 7) == 7
+    assert omd.setdefault('d', 9) == 7
+
+    assert omd.pop('a') == 3
+    assert omd.getlist('a') == []
+    assert omd.pop('a', 'fallback') == 'fallback'
+    with pytest.raises(KeyError):
+        omd.pop('a')
+    assert omd.popall('b') == [4, 5]
+    assert omd.popall('b', []) == []
+
+    omd.add('z', 1)
+    omd.add('z', 2)
+    assert omd.poplast('z') == 2
+    assert omd.getlist('z') == [1]
+    assert omd.poplast('z') == 1
+    assert 'z' not in omd
+    with pytest.raises(KeyError):
+        omd.poplast('z')
+    assert omd.poplast('z', 'fallback') == 'fallback'
+
+    ordered = OMD([('a', 1), ('b', 2)])
+    assert ordered.poplast() == 2
+    assert ordered.poplast() == 1
+    with pytest.raises(KeyError):
+        ordered.poplast()
+    assert OMD().poplast(default='empty') == 'empty'
+
+
+def test_fallback_omd_copy_update(fallback_urlutils):
+    OMD = fallback_urlutils.OrderedMultiDict
+    omd = OMD([('a', 1), ('b', 2), ('a', 3)])
+    copied = omd.copy()
+    assert copied == omd
+    assert copied is not omd
+    assert OMD.fromkeys(['x', 'y']) == OMD([('x', None), ('y', None)])
+    assert OMD.fromkeys(['x'], 0) == OMD([('x', 0)])
+
+    omd.update(omd)
+    assert omd.items(multi=True) == [('a', 1), ('b', 2), ('a', 3)]
+    omd.update(OMD([('a', 9)]))
+    assert omd.getlist('a') == [9]
+    omd.update({'b': 5})
+    assert omd.getlist('b') == [5]
+    omd.update([('c', 1), ('c', 2)])
+    assert omd.getlist('c') == [1, 2]
+    omd.update([('d', 1)], d=2, e=3)
+    assert omd['d'] == 2
+    assert omd['e'] == 3
+
+    existing = OMD([('a', 1)])
+    existing.update([('a', 2)])
+    assert existing.getlist('a') == [2]
+
+    extended = OMD([('a', 1)])
+    extended.update_extend(extended)
+    extended.update_extend(OMD([('a', 2)]))
+    extended.update_extend({'a': 3})
+    extended.update_extend([('a', 4)])
+    assert extended.getlist('a') == [1, 1, 2, 3, 4]
+
+
+def test_fallback_omd_equality(fallback_urlutils):
+    OMD = fallback_urlutils.OrderedMultiDict
+    omd = OMD([('x', 1), ('y', 2)])
+    assert omd == omd
+    assert omd == OMD([('x', 1), ('y', 2)])
+    assert not (omd != OMD([('x', 1), ('y', 2)]))
+    assert omd == {'x': 1, 'y': 2}
+    assert (omd == {'x': 1, 'z': 2}) is False
+    assert (omd == {'x': 9, 'y': 2}) is False
+    assert (omd == {'x': 1}) is False
+    assert (omd == [1, 2]) is False
+    assert (omd == 5) is False
+    assert (omd == OMD([('x', 1)])) is False
+    assert (omd == OMD([('x', 1), ('z', 2)])) is False
+    assert (omd == OMD([('x', 1), ('y', 2), ('y', 2)])) is False
+
+
+def test_fallback_omd_state_item_and_views(fallback_urlutils):
+    OMD = fallback_urlutils.OrderedMultiDict
+    omd = OMD([('a', 1), ('a', 2), ('b', 3)])
+    assert omd.__getstate__() == [('a', 1), ('a', 2), ('b', 3)]
+    restored = OMD()
+    restored.__setstate__(omd.__getstate__())
+    assert restored == omd
+
+    omd['a'] = 9
+    assert omd.getlist('a') == [9]
+    del omd['a']
+    assert 'a' not in omd
+
+    other = OMD([('a', 1)])
+    other |= {'a': 2, 'b': 3}
+    assert other['a'] == 2
+    assert other['b'] == 3
+
+    assert set(omd.viewkeys()) == {'b'}
+    assert list(omd.viewvalues()) == [3]
+    assert list(omd.viewitems()) == [('b', 3)]
+
+    with pytest.raises(TypeError):
+        OMD([('a', 1)], [('b', 2)])
+
+
+def test_fallback_omd_sorted_and_clear(fallback_urlutils):
+    OMD = fallback_urlutils.OrderedMultiDict
+    omd = OMD(zip(range(3), range(3)))
+    assert omd.sorted(reverse=True) == OMD([(2, 2), (1, 1), (0, 0)])
+
+    values = OMD([('even', 6), ('odd', 1), ('even', 2),
+                  ('odd', 5), ('even', 4), ('odd', 3)])
+    sorted_values = values.sortedvalues()
+    assert sorted_values.getlist('even') == [2, 4, 6]
+    assert sorted_values.getlist('odd') == [1, 3, 5]
+    assert sorted_values.keys(multi=True) == values.keys(multi=True)
+    assert sorted_values != values
+
+    values.clear()
+    assert values == OMD()
+    assert values.items() == []
+
+
+def test_fallback_query_param_dict(fallback_urlutils):
+    QueryParamDict = fallback_urlutils.QueryParamDict
+    qpd = QueryParamDict.from_text('a=1&a=2&b=')
+    assert qpd.getlist('a') == ['1', '2']
+    assert qpd['b'] is None
+    assert qpd.to_text() == 'a=1&a=2&b'
+    assert qpd.to_text(full_quote=True) == 'a=1&a=2&b'
+
+    quoted = QueryParamDict([('k', 'a b&c')])
+    assert quoted.to_text() == 'k=a b%26c'
+    assert quoted.to_text(full_quote=True) == 'k=a%20b%26c'
+
+    url = fallback_urlutils.URL('http://example.com/p?x=1&x=2#frag')
+    assert url.query_params.getlist('x') == ['1', '2']
+    assert url.to_text() == 'http://example.com/p?x=1&x=2#frag'

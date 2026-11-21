@@ -1,7 +1,8 @@
 import sys
 import pytest
 
-from boltons.dictutils import OMD, OneToOne, ManyToMany, FrozenDict, subdict, FrozenHashError
+from boltons.dictutils import (OMD, OneToOne, ManyToMany, FrozenDict, subdict,
+                               FrozenHashError, FastIterOrderedMultiDict)
 from boltons.urlutils import QueryParamDict
 
 
@@ -678,3 +679,229 @@ def test_frozendict_api():
 
     import copy
     assert copy.copy(fd) is fd
+
+
+## Additional behavioural coverage for OMD branches
+
+
+def test_omd_init_rejects_multiple_args():
+    with pytest.raises(TypeError):
+        OMD({}, {})
+
+
+def test_omd_init_kwargs():
+    omd = OMD(a=1, b=2)
+    assert omd == {'a': 1, 'b': 2}
+    assert omd.getlist('a') == [1]
+
+
+def test_omd_getlist_missing_default():
+    omd = OMD()
+    assert omd.getlist('nope') == []
+    sentinel = object()
+    assert omd.getlist('nope', sentinel) is sentinel
+
+
+def test_omd_fromkeys():
+    omd = OMD.fromkeys(['a', 'b'])
+    assert omd == {'a': None, 'b': None}
+    assert omd.getlist('a') == [None]
+
+    zeroed = OMD.fromkeys(['a', 'b'], 0)
+    assert zeroed == {'a': 0, 'b': 0}
+
+
+def test_omd_update_mapping_and_kwargs():
+    omd = OMD([('a', 1)])
+    omd.update({'a': 2, 'b': 3}, c=4)
+    assert omd['a'] == 2
+    assert omd['b'] == 3
+    assert omd['c'] == 4
+    # updating an existing key replaces all of its values
+    assert omd.getlist('a') == [2]
+
+
+def test_omd_setitem_replaces_existing_values():
+    omd = OMD([('a', 1), ('a', 2)])
+    omd['a'] = 9
+    assert omd.getlist('a') == [9]
+    assert len(omd.items(multi=True)) == 1
+
+
+def test_omd_eq_non_mapping_and_unorderable():
+    assert (OMD() == object()) is False
+    assert (OMD() == 42) is False
+    assert (OMD([('a', 1)]) == 42) is False
+    # an ordered sequence is not a mapping, so equality is False
+    assert (OMD([('a', 1)]) == [('a', 1)]) is False
+    # same key/order but a different value is not equal
+    assert OMD([('a', 1)]) != OMD([('a', 2)])
+
+
+def test_omd_poplast_defaults():
+    omd = OMD()
+    assert omd.poplast(default='empty') == 'empty'
+    with pytest.raises(KeyError):
+        omd.poplast()
+
+    assert omd.poplast('missing', default='absent') == 'absent'
+    with pytest.raises(KeyError):
+        omd.poplast('missing')
+
+
+def test_omd_sorted():
+    omd = OMD([('b', 2), ('a', 3), ('a', 1)])
+    assert list(omd.sorted().iteritems(multi=True)) == [('a', 1), ('a', 3), ('b', 2)]
+    assert list(omd.sorted(reverse=True).iteritems(multi=True)) == [('b', 2), ('a', 3), ('a', 1)]
+
+
+def test_omd_sortedvalues():
+    omd = OMD([('b', 2), ('a', 3), ('a', 1)])
+    # keys keep their order, values within each key are sorted
+    assert list(omd.sortedvalues().iteritems(multi=True)) == [('b', 2), ('a', 1), ('a', 3)]
+    assert list(omd.sortedvalues(reverse=True).iteritems(multi=True)) == [('b', 2), ('a', 3), ('a', 1)]
+
+
+def test_omd_counts():
+    omd = OMD([('a', 1), ('a', 2), ('b', 3)])
+    counts = omd.counts()
+    assert counts == {'a': 2, 'b': 1}
+    assert type(counts) is OMD
+
+
+def test_omd_views():
+    omd = OMD([('a', 1), ('b', 2)])
+    assert set(omd.viewkeys()) == {'a', 'b'}
+    assert set(omd.viewvalues()) == {1, 2}
+    assert set(omd.viewitems()) == {('a', 1), ('b', 2)}
+
+
+## FastIterOrderedMultiDict
+
+
+def test_fastiter_multivalue_order():
+    f = FastIterOrderedMultiDict()
+    for v in (1, 2, 3):
+        f.add('a', v)
+        f.add('b', v * 10)
+
+    assert list(f.iteritems(multi=True)) == [
+        ('a', 1), ('b', 10), ('a', 2), ('b', 20), ('a', 3), ('b', 30)]
+    # non-multi iteration visits each key once, at its first insertion
+    assert list(f.iteritems()) == [('a', 1), ('b', 10)]
+    assert f.keys() == ['a', 'b']
+    assert f.keys(multi=True) == ['a', 'b', 'a', 'b', 'a', 'b']
+    assert f.getlist('a') == [1, 2, 3]
+    assert f['a'] == 3
+    assert len(f) == 2
+
+
+def test_fastiter_reversed_skips_duplicates():
+    f = FastIterOrderedMultiDict([('k', i) for i in range(5)])
+    assert list(reversed(f)) == ['k']
+
+    f.add('n', 1)
+    assert list(reversed(f)) == ['n', 'k']
+
+    # adding another value under an existing key does not move the key in
+    # key-only iteration
+    f.add('k', 99)
+    assert list(reversed(f)) == ['n', 'k']
+
+
+def test_fastiter_removals():
+    f = FastIterOrderedMultiDict()
+    for v in (1, 2, 3):
+        f.add('a', v)
+        f.add('b', v * 10)
+
+    assert f.popall('b') == [10, 20, 30]
+    assert list(f.iteritems(multi=True)) == [('a', 1), ('a', 2), ('a', 3)]
+
+    assert f.poplast('a') == 3
+    assert list(f.iteritems(multi=True)) == [('a', 1), ('a', 2)]
+
+    # pop removes all remaining values, returning the most recent
+    assert f.pop('a') == 2
+    assert len(f) == 0
+    assert list(f.iteritems(multi=True)) == []
+
+    # removing the sole value under a key drops the key entirely
+    f.add('solo', 1)
+    assert f.poplast('solo') == 1
+    assert 'solo' not in f
+
+
+def test_fastiter_setitem_update_delete_clear():
+    f = FastIterOrderedMultiDict([('x', 1), ('x', 2), ('y', 3)])
+    assert list(f.iteritems(multi=True)) == [('x', 1), ('x', 2), ('y', 3)]
+
+    f['y'] = 9
+    assert list(f.iteritems(multi=True)) == [('x', 1), ('x', 2), ('y', 9)]
+
+    del f['x']
+    assert 'x' not in f
+    assert list(f.iteritems(multi=True)) == [('y', 9)]
+
+    f.clear()
+    assert len(f) == 0
+    assert list(f.iteritems(multi=True)) == []
+
+
+def test_fastiter_update_and_copy():
+    f = FastIterOrderedMultiDict([('x', 1), ('x', 2)])
+    f.update({'x': 5})
+    assert f.getlist('x') == [5]
+
+    f.update([('z', 6), ('z', 7)])
+    assert f.getlist('z') == [6, 7]
+
+    clone = f.copy()
+    assert clone == f
+    assert list(clone.iteritems(multi=True)) == list(f.iteritems(multi=True))
+    clone.add('z', 8)
+    assert f.getlist('z') == [6, 7]
+
+
+## Additional OneToOne / ManyToMany branches
+
+
+def test_one_to_one_pop_defaults_and_repr():
+    oto = OneToOne({'a': 1})
+    assert oto.pop('missing', 42) == 42
+    with pytest.raises(KeyError):
+        oto.pop('missing')
+    assert repr(oto) == "OneToOne({'a': 1})"
+
+
+def test_one_to_one_unique_across_inputs():
+    with pytest.raises(ValueError):
+        OneToOne.unique({'a': 1}, b=1)
+
+
+def test_many_to_many_setitem_replaces_and_updates():
+    m2m = ManyToMany([('a', 1), ('a', 2)])
+    m2m['a'] = {2, 3}
+    assert m2m['a'] == frozenset({2, 3})
+    assert 1 not in m2m.inv
+    assert m2m.inv[3] == frozenset({'a'})
+
+    # merging another ManyToMany updates both forward and inverse data
+    other = ManyToMany([('a', 2), ('b', 5)])
+    m2m.update(other)
+    assert m2m['a'] == frozenset({2, 3})
+    assert m2m['b'] == frozenset({5})
+    assert m2m.inv[2] == frozenset({'a'})
+
+    del m2m['a']
+    assert 'a' not in m2m
+    assert 2 not in m2m.inv
+    assert 3 not in m2m.inv
+
+    # replacing an absent key is a no-op
+    m2m.replace('absent', 'elsewhere')
+    assert 'absent' not in m2m
+    assert 'elsewhere' not in m2m
+
+    assert set(m2m.keys()) == set(m2m)
+    assert list(m2m) == list(m2m.keys())
