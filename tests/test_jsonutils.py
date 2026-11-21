@@ -1,4 +1,5 @@
 import os
+import sys
 
 from boltons.jsonutils import (JSONLIterator,
                                DEFAULT_BLOCKSIZE,
@@ -146,3 +147,88 @@ def test_jsonl_iterator_text_cur_byte_pos(tmp_path):
         assert next(jsonl_iter) == {'1': 1}
         assert jsonl_iter.cur_byte_pos == len('{"1": 1}\n')
         assert list(jsonl_iter) == [{'2': 2}]
+
+
+def test_jsonl_iterator_rejects_out_of_range_rel_seek(tmp_path):
+    import pytest
+
+    path = tmp_path / 'records.jsonl'
+    path.write_text('{"n": 1}\n')
+    with path.open('rb') as stream:
+        for bad in (1.5, -1.0, 2):
+            with pytest.raises(ValueError) as excinfo:
+                JSONLIterator(stream, rel_seek=bad)
+            assert 'rel_seek' in str(excinfo.value)
+
+
+def test_jsonl_iterator_rel_seek_zero_reads_from_start(tmp_path):
+    path = tmp_path / 'records.jsonl'
+    path.write_text('{"n": 1}\n{"n": 2}\n{"n": 3}\n')
+    with path.open('rb') as stream:
+        assert list(JSONLIterator(stream, rel_seek=0.0)) == [
+            {'n': 1}, {'n': 2}, {'n': 3}]
+
+
+def test_jsonl_iterator_raises_on_corrupt_line_by_default(tmp_path):
+    import pytest
+
+    path = tmp_path / 'records.jsonl'
+    path.write_text('{"n": 1}\nnot json\n{"n": 3}\n')
+    with path.open('rb') as stream:
+        jsonl_iter = JSONLIterator(stream)
+        assert next(jsonl_iter) == {'n': 1}
+        with pytest.raises(ValueError):
+            next(jsonl_iter)
+
+
+def test_jsonl_iterator_ignore_errors_skips_corrupt_lines(tmp_path):
+    path = tmp_path / 'records.jsonl'
+    path.write_text('{"n": 1}\nnot json\n\n{"n": 3}\n')
+    with path.open('rb') as stream:
+        jsonl_iter = JSONLIterator(stream, ignore_errors=True)
+        assert list(jsonl_iter) == [{'n': 1}, {'n': 3}]
+
+
+def test_jsonl_iterator_skips_blank_and_whitespace_lines(tmp_path):
+    path = tmp_path / 'records.jsonl'
+    path.write_text('\n   \n{"n": 1}\n\t\n{"n": 2}\n')
+    with path.open('rb') as stream:
+        assert list(JSONLIterator(stream)) == [{'n': 1}, {'n': 2}]
+
+
+def test_jsonl_script_help_exits_after_usage(monkeypatch, capsys):
+    import runpy
+
+    monkeypatch.setattr(sys, 'argv', ['jsonutils', '--help'])
+    from boltons import jsonutils as _jsonutils
+    runpy.run_path(_jsonutils.__file__, run_name='__main__')
+    out = capsys.readouterr().out
+    assert 'loads one or more JSON Line files' in out
+
+
+def test_jsonl_script_verbose_counts_objects(tmp_path, monkeypatch, capsys):
+    import runpy
+
+    path = tmp_path / 'records.jsonl'
+    path.write_text(''.join('{"n": %d}\n' % i for i in range(100)))
+    monkeypatch.setattr(sys, 'argv', ['jsonutils', '-v', str(path)])
+    from boltons import jsonutils as _jsonutils
+    runpy.run_path(_jsonutils.__file__, run_name='__main__')
+    out = capsys.readouterr().out
+    assert 'files checked: 1' in out
+    assert 'objects loaded: 100' in out
+    assert '.' in out
+    assert '100\n' in out
+
+
+def test_jsonl_script_reports_corrupt_line(tmp_path, monkeypatch, capsys):
+    import runpy
+
+    path = tmp_path / 'records.jsonl'
+    path.write_text('not json\n')
+    monkeypatch.setattr(sys, 'argv', ['jsonutils', str(path)])
+    from boltons import jsonutils as _jsonutils
+    runpy.run_path(_jsonutils.__file__, run_name='__main__')
+    out = capsys.readouterr().out
+    assert 'error reading object #1 around byte' in out
+    assert str(path) in out
