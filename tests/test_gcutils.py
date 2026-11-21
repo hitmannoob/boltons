@@ -65,3 +65,42 @@ if '__pypy__' not in sys.builtin_module_names:
         with_gc_time = time.time() - start
 
         time_diff = no_gc_time < with_gc_time
+
+
+if '__pypy__' not in sys.builtin_module_names:
+    from pytest import raises
+    import boltons.gcutils as gcutils
+
+    def test_get_all_rejects_non_type():
+        with raises(TypeError):
+            get_all(42)
+
+    def test_get_all_falls_back_when_is_tracked_unavailable(monkeypatch):
+        class Untracked:
+            pass
+
+        instance = Untracked()
+
+        def no_is_tracked(obj):
+            raise AttributeError('simulated old Python')
+
+        monkeypatch.setattr(gcutils.gc, 'is_tracked', no_is_tracked)
+        assert instance in gcutils.get_all(Untracked)
+
+    def test_all_types_visits_diamond_once():
+        class A:
+            pass
+
+        class B(A):
+            pass
+
+        class C(A):
+            pass
+
+        class D(B, C):
+            pass
+
+        types = gcutils._all_types(A)
+        assert types.count(A) == 1
+        assert types.count(D) == 1
+        assert set(types) == {A, B, C, D}

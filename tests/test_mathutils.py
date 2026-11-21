@@ -157,3 +157,46 @@ def test_bits_rshift_past_width():
     assert len(shifted) == 0
     assert shifted.as_bin() == ''
     assert Bits('101') >> 1 == Bits('10')
+
+
+def test_clamp_rejects_inverted_bounds():
+    with raises(ValueError):
+        clamp(1, 5, 0)
+
+
+def test_ceil_floor_without_options_are_builtin():
+    assert ceil(1.2) == 2
+    assert ceil(-1.2) == -1
+    assert floor(1.8) == 1
+    assert floor(-1.2) == -2
+
+
+def test_bits_from_bytes_is_binary_text():
+    assert Bits(b'101') == Bits('101')
+
+
+def test_bits_rejects_bad_initial_values():
+    with raises(TypeError):
+        Bits(1.5)
+    with raises(ValueError):
+        Bits(-1)
+
+
+def test_bits_getitem_rejects_bad_key():
+    with raises(TypeError):
+        Bits('10')['0']
+
+
+def test_bits_operators_return_notimplemented_for_foreign_types():
+    bits = Bits('10')
+    assert bits.__eq__('10') is NotImplemented
+    assert bits.__or__(2) is NotImplemented
+    assert bits.__and__(2) is NotImplemented
+    assert (bits == '10') is False
+    with raises(TypeError):
+        bits | 2
+
+
+def test_bits_hash_and_repr():
+    assert hash(Bits('10')) == hash(2)
+    assert repr(Bits('101')) == "Bits('101')"
