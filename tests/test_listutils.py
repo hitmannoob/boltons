@@ -324,3 +324,112 @@ def test_barrel_list_del_stepped_slice_matches_list():
                         del ref[start:stop:step]
                         del bl[start:stop:step]
                         assert list(bl) == ref, (size, start, stop, step)
+
+
+def test_barrel_list_append_contains_repr_reverse_count():
+    bl = _small_multi_bl([5, 3, 8, 1, 9, 3])
+    bl.append(42)
+    assert bl[-1] == 42
+    assert 9 in bl and 42 in bl
+    assert 100 not in bl
+    assert repr(bl) == 'BarrelList([5, 3, 8, 1, 9, 3, 42])'
+    assert bl.count(3) == 2
+    bl.reverse()
+    assert list(bl) == [42, 3, 9, 1, 8, 3, 5]
+
+
+def test_barrel_list_indexed_set_and_delete():
+    import pytest
+
+    ref = list(range(12))
+    for bl in _bl_variants(ref):
+        expected = list(ref)
+        bl[0] = 'a'
+        expected[0] = 'a'
+        bl[-1] = 'z'
+        expected[-1] = 'z'
+        assert list(bl) == expected
+        del bl[3]
+        del expected[3]
+        assert list(bl) == expected
+        with pytest.raises(IndexError):
+            bl[len(bl)] = 1
+        with pytest.raises(IndexError):
+            del bl[len(bl)]
+        with pytest.raises(IndexError):
+            bl[len(bl)]
+
+
+def test_barrel_list_slice_set_matches_list():
+    ref = list(range(12))
+    for bl in _bl_variants(ref):
+        expected = list(ref)
+        bl[1:3] = [100, 200, 300]
+        expected[1:3] = [100, 200, 300]
+        assert list(bl) == expected
+
+
+def test_barrel_list_delete_with_zero_step_raises():
+    import pytest
+
+    bl = _small_multi_bl([1, 2, 3])
+    with pytest.raises(ValueError):
+        del bl[::0]
+    assert list(bl) == [1, 2, 3]
+
+
+def test_barrel_list_pop_skips_empty_sublists():
+    bl = BarrelList()
+    bl.lists = [[1, 2], [3], []]
+    assert bl.pop() == 3
+    assert bl.lists == [[1, 2]]
+    assert bl.pop() == 2
+    assert bl.pop() == 1
+
+
+def test_barrel_list_negative_index_out_of_range():
+    import pytest
+
+    bl = _small_multi_bl([1, 2, 3])
+    with pytest.raises(IndexError):
+        bl[-10]
+
+
+def test_barrel_list_concat_requires_list():
+    import pytest
+
+    bl = BarrelList([1, 2])
+    with pytest.raises(TypeError):
+        bl + 3
+    with pytest.raises(TypeError):
+        3 + bl
+
+
+def test_barrel_list_legacy_slice_methods():
+    bl = BarrelList(range(6))
+    assert list(bl.__getslice__(1, 4)) == [1, 2, 3]
+    bl.__setslice__(1, 4, [9, 9])
+    assert list(bl) == [0, 9, 9, 4, 5]
+
+    multi = _small_multi_bl(range(6))
+    multi.__setslice__(1, 3, [7, 7, 7])
+    assert list(multi) == [0, 7, 7, 7, 3, 4, 5]
+
+
+def test_barrel_list_balance_list_negative_index():
+    bl = BarrelList(range(5))
+    assert bl._balance_list(-1) is False
+
+
+def test_barrel_list_pop_out_of_range_raises():
+    import pytest
+
+    bl = _small_multi_bl([1, 2, 3])
+    with pytest.raises(IndexError):
+        bl.pop(len(bl))
+
+
+def test_splay_list_shift_to_same_index_is_noop():
+    splay = SplayList(range(5))
+    splay.shift(2, 2)
+    assert list(splay) == [0, 1, 2, 3, 4]

@@ -72,3 +72,65 @@ def test_deferredvalue():
     assert myfunc.called == 2
     assert str(dv) == '123'
     assert myfunc.called == 3
+
+
+def test_construct_format_field_str():
+    from boltons.formatutils import construct_format_field_str
+
+    assert construct_format_field_str(None, None, None) == ''
+    assert construct_format_field_str('name', '', None) == '{name}'
+    assert construct_format_field_str('name', '>10', 'r') == '{name!r:>10}'
+
+
+def test_get_format_args_exact_types_and_dedup():
+    fargs, fkwargs = get_format_args('{0} {0} {name} {name}')
+    assert fargs == [(0, str)]
+    assert fkwargs == [('name', str)]
+
+    fargs, fkwargs = get_format_args('{1:d} {2:f}')
+    assert fargs == [(1, int), (2, float)]
+    assert fkwargs == []
+
+
+def test_get_format_args_rejects_compound_and_anonymous():
+    import pytest
+
+    with pytest.raises(ValueError):
+        get_format_args('{a.b}')
+    with pytest.raises(ValueError):
+        get_format_args('{}')
+
+
+def test_base_format_field_fstr_repr_str():
+    from boltons.formatutils import BaseFormatField
+
+    field = BaseFormatField('name')
+    assert field.fstr == '{name}'
+    assert str(field) == '{name}'
+    assert repr(field) == "BaseFormatField('name')"
+    assert field.is_positional is False
+
+    field = BaseFormatField('name', '>10')
+    assert field.fstr == '{name:>10}'
+    assert repr(field) == "BaseFormatField('name', '>10')"
+
+    field = BaseFormatField('name', '>10', 'r')
+    assert field.fstr == '{name!r:>10}'
+    assert repr(field) == "BaseFormatField('name', '>10', 'r')"
+
+    assert BaseFormatField('0').is_positional is True
+    assert BaseFormatField('').is_positional is True
+
+
+def test_deferredvalue_conversions_and_format():
+    dv = DV(lambda: 42)
+    assert int(dv) == 42
+    assert float(dv) == 42.0
+    assert repr(dv) == '42'
+    assert dv.__unicode__() == '42'
+    assert format(dv, 'd') == '42'
+
+    # str has no 'd' presentation type, so __format__ falls back to the
+    # nominal int conversion for that presentation type.
+    dv_str = DV(lambda: '7')
+    assert format(dv_str, 'd') == '7'
