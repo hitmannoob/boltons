@@ -402,3 +402,369 @@ def test_complement_set_identities(op, ref):
             res = op(_make_cset(a, rep_a), _make_cset(b, rep_b))
             got = {x for x in _UNIVERSE if x in res}
             assert got == ref(a, b), (op, a, rep_a, b, rep_b)
+
+
+# --- coverage backfill: IndexedSet API surface ---
+
+def test_iset_repr_and_eq():
+    iset = IndexedSet([1, 2])
+    assert repr(iset) == 'IndexedSet([1, 2])'
+    assert iset == {2, 1}
+    assert iset == [1, 2]
+    assert not (iset == {1})
+    assert iset != {1}
+    assert not (iset == 1)  # non-iterable other falls through TypeError
+
+
+def test_iset_remove_discard_clear():
+    iset = IndexedSet([1, 2, 3])
+    iset.remove(2)
+    assert list(iset) == [1, 3]
+    with raises(KeyError):
+        iset.remove(2)
+    iset.discard(2)  # quietly ignores a missing value
+    iset.discard(1)
+    assert list(iset) == [3]
+    iset.clear()
+    assert list(iset) == []
+    assert len(iset) == 0
+    assert iset.item_list == []
+
+
+def test_iset_remove_only_item_culls():
+    iset = IndexedSet([7])
+    iset.remove(7)
+    assert list(iset) == []
+    assert iset.item_list == []
+    assert iset.dead_indices == []
+
+
+def test_iset_isdisjoint_subset_superset():
+    a = IndexedSet([1, 2, 3])
+    assert a.isdisjoint({4, 5})
+    assert not a.isdisjoint({3, 4})
+    assert a.issubset({1, 2, 3, 4})
+    assert not a.issubset({1, 2})
+    assert not a.issubset({1, 2, 4})
+    assert a.issuperset({1, 2})
+    assert not a.issuperset({1, 2, 4})
+
+
+def test_iset_union_intersection_difference_multi():
+    iset = IndexedSet([1, 2, 3, 4])
+    assert list(iset.union([4, 5], (6,))) == [1, 2, 3, 4, 5, 6]
+    assert list(iset.intersection({2, 3, 4}, [3, 4, 5])) == [3, 4]
+    assert list(iset.iter_intersection({2, 3, 4}, [3, 4, 5])) == [3, 4]
+    assert list(iset.difference({2}, [4])) == [1, 3]
+    assert list(iset.iter_difference({2}, [4])) == [1, 3]
+
+
+def test_iset_update_with_no_args():
+    iset = IndexedSet([1])
+    assert iset.update() is None
+    assert list(iset) == [1]
+
+
+def test_iset_symmetric_difference_update_self_clears():
+    iset = IndexedSet([1, 2, 3])
+    iset ^= iset
+    assert list(iset) == []
+
+
+def test_iset_count_reverse_sort_index():
+    iset = IndexedSet([3, 1, 2])
+    assert iset.count(1) == 1
+    assert iset.count(9) == 0
+    iset.reverse()
+    assert list(iset) == [2, 1, 3]
+    iset.sort()
+    assert list(iset) == [1, 2, 3]
+    iset.sort()  # already sorted -> early return
+    assert list(iset) == [1, 2, 3]
+    iset.sort(reverse=True)
+    assert list(iset) == [3, 2, 1]
+    iset.remove(2)
+    assert iset.index(3) == 0
+    assert iset.index(1) == 1
+    with raises(ValueError):
+        iset.index(2)
+
+
+def test_iset_reverse_and_sort_drop_dead_slots():
+    iset = IndexedSet(range(6))
+    iset.remove(2)
+    iset.remove(4)
+    iset.reverse()
+    assert list(iset) == [5, 3, 1, 0]
+    iset.sort()
+    assert list(iset) == [0, 1, 3, 5]
+    assert iset.dead_indices == []
+
+
+def test_iset_compact_noop_and_large():
+    iset = IndexedSet(range(4))
+    iset._compact()  # no dead indices -> early return
+    assert list(iset) == [0, 1, 2, 3]
+
+    big = IndexedSet(range(5000))
+    for i in range(0, 5000, 10):  # 500 removals, past _MAX_DEAD_INTERVALS
+        big.remove(i)
+    assert len(big) == 4500
+    assert big[0] == 1
+    assert big._c_max_size > 0
+    assert len(big.dead_indices) < 384
+
+
+def test_iset_add_dead_merges_intervals():
+    # a large set keeps the dead-slot intervals around (no compaction yet),
+    # so adjacent removals exercise interval merging in _add_dead
+    iset = IndexedSet(range(100))
+    iset.remove(50)
+    iset.remove(49)  # extend the interval leftward
+    assert iset.dead_indices == [[49, 51]]
+    iset.remove(51)  # extend the interval rightward
+    assert iset.dead_indices == [[49, 52]]
+    assert list(iset)[47:53] == [47, 48, 52, 53, 54, 55]
+
+
+# --- coverage backfill: complement sets ---
+
+def _materialize(obj, universe=_UNIVERSE):
+    return {x for x in universe if x in obj}
+
+
+def test_complement_named_binary_methods():
+    reps = ['+', '-']
+    for a, b in itertools.product(_SUBSETS, repeat=2):
+        for rep_a, rep_b in itertools.product(reps, repeat=2):
+            A, B = _make_cset(a, rep_a), _make_cset(b, rep_b)
+            assert _materialize(A.intersection(B)) == a & b
+            assert _materialize(A.union(B)) == a | b
+            assert _materialize(A.difference(B)) == a - b
+            assert _materialize(A.symmetric_difference(B)) == a ^ b
+
+
+def test_complement_isdisjoint_and_subset_methods():
+    # included-form complements act like finite sets
+    a = _make_cset({1, 2}, '+')
+    assert a.isdisjoint({3, 4})
+    assert not a.isdisjoint({2, 3})
+    assert a.issubset({1, 2, 3})
+    assert not a.issubset({1, 4})
+    assert a.issuperset({1})
+    assert not a.issuperset({1, 4})
+    # excluded-form complements are cofinite
+    x = _make_cset({1, 2}, '-')
+    y = _make_cset({3, 4}, '-')
+    assert x.isdisjoint(y) is False  # cofinite sets always overlap
+    assert x.isdisjoint(set()) is True  # nothing to overlap with
+    assert x.isdisjoint(set(_UNIVERSE)) is False
+
+
+def test_complement_named_methods_reject_bad_args():
+    c = _make_cset({1, 2}, '-')
+    for meth in (c.intersection, c.union, c.difference,
+                 c.symmetric_difference, c.issubset, c.issuperset):
+        with raises(TypeError):
+            meth(object())
+
+
+def test_complement_inplace_update_matches_union():
+    # update() is union in place; it must agree with | for every
+    # included/excluded representation pair (regression: three of the
+    # four branches used to drop or invert the update)
+    reps = ['+', '-']
+    for a, b in itertools.product(_SUBSETS, repeat=2):
+        for rep_a, rep_b in itertools.product(reps, repeat=2):
+            A = _make_cset(a, rep_a)
+            expected = _materialize(A | _make_cset(b, rep_b))
+            A.update(_make_cset(b, rep_b))
+            assert _materialize(A) == expected, ('update', a, rep_a, b, rep_b)
+
+
+def test_complement_inplace_discard_matches_difference():
+    # discard() is difference in place; it must agree with - for every
+    # included/excluded representation pair (regression: included forms
+    # silently ignored plain-set operands)
+    reps = ['+', '-']
+    for a, b in itertools.product(_SUBSETS, repeat=2):
+        for rep_a, rep_b in itertools.product(reps, repeat=2):
+            A = _make_cset(a, rep_a)
+            expected = _materialize(A - _make_cset(b, rep_b))
+            A.discard(_make_cset(b, rep_b))
+            assert _materialize(A) == expected, ('discard', a, rep_a, b, rep_b)
+
+
+def test_complement_update_discard_with_plain_iterables():
+    # included (finite) form: materialization is exact
+    inc = complement(complement({1, 2}))
+    inc.update([3, 4])
+    assert _materialize(inc) == {1, 2, 3, 4}
+    inc.discard([1])
+    assert _materialize(inc) == {2, 3, 4}
+
+    # excluded (cofinite) form: excluded values are removed, not added
+    exc = complement({1, 2})
+    exc.update([1])
+    assert _materialize(exc) == set(_UNIVERSE) - {2}
+    exc.discard([3])
+    assert _materialize(exc) == set(_UNIVERSE) - {2, 3}
+
+
+def test_complement_symmetric_difference_update_all_reps():
+    reps = ['+', '-']
+    for a, b in itertools.product(_SUBSETS, repeat=2):
+        for rep_a, rep_b in itertools.product(reps, repeat=2):
+            A = _make_cset(a, rep_a)
+            A.symmetric_difference_update(_make_cset(b, rep_b))
+            assert _materialize(A) == (a ^ b), (a, rep_a, b, rep_b)
+
+
+def test_complement_rsub_all_reps():
+    for a, b in itertools.product(_SUBSETS, repeat=2):
+        for rep_a, rep_b in itertools.product(['+', '-'], repeat=2):
+            A, B = _make_cset(a, rep_a), _make_cset(b, rep_b)
+            got = A - B
+            assert _materialize(got) == (a - b)
+
+
+def test_complement_complemented_roundtrip():
+    s = set(range(4))
+    c = complement(s)  # cofinite: everything but {0, 1, 2, 3}
+    assert repr(c) == 'complement({0, 1, 2, 3})'
+    inc = c.complemented()  # the finite included form
+    assert inc._included == s and inc._excluded is None
+    assert _materialize(inc) == s
+    assert complement(inc) == c
+    # frozenset-backed complements stay frozenset-backed
+    fc = complement(frozenset({1, 2}))
+    fcc = fc.complemented()
+    assert fcc._included == frozenset({1, 2})
+    assert isinstance(fcc._included, frozenset)
+
+
+def test_complement_inplace_complement_and_mutation():
+    c = complement({1, 2})  # cofinite, missing 1 and 2
+    c.complement()  # flips to the finite included form {1, 2}
+    assert _materialize(c) == {1, 2}
+    c.complement()  # and back
+    assert _materialize(c) == set(_UNIVERSE) - {1, 2}
+
+    inc = complement(complement({1, 2}))
+    popped = inc.pop()
+    assert popped in {1, 2}
+    inc.add(3)
+    assert _materialize(inc) == ({1, 2} - {popped}) | {3}
+    inc.remove(3)
+    assert _materialize(inc) == {1, 2} - {popped}
+
+    exc = complement({1})  # everything but 1
+    exc.add(1)  # adding the missing element makes it universal
+    assert _materialize(exc) == set(_UNIVERSE)
+    exc.remove(1)  # removing it excludes it again
+    assert _materialize(exc) == set(_UNIVERSE) - {1}
+
+
+def test_complement_dunder_protocols():
+    inc = complement(complement({1, 2}))
+    exc = complement({1, 2})
+    assert len(inc) == 2
+    assert sorted(iter(inc)) == [1, 2]
+    assert bool(inc) is True
+    assert bool(complement(complement(set()))) is False
+    assert bool(exc) is True
+    with raises(NotImplementedError):
+        len(exc)
+    with raises(NotImplementedError):
+        iter(exc)
+    # hashing needs immutable (frozenset-backed) contents
+    frozen = complement(frozenset({1, 2}))
+    assert hash(frozen) == hash(frozen)
+    assert frozen == complement(frozenset({1, 2}))
+    assert inc == complement(complement({1, 2}))
+    assert inc == {1, 2}
+    assert inc != {1}
+    with raises(ValueError):
+        _ComplementSetBoth()
+
+
+def _ComplementSetBoth():
+    from boltons.setutils import _ComplementSet
+    return _ComplementSet(included={1}, excluded={2})
+
+
+def test_complement_operator_type_errors():
+    c = complement({1, 2})
+    for fn in (lambda: c & object(), lambda: c | object(),
+               lambda: c ^ object(), lambda: c - object()):
+        with raises(TypeError):
+            fn()
+
+
+def test_iset_issuperset_longer_other_and_isub():
+    a = IndexedSet([1, 2, 3])
+    assert not a.issuperset({1, 2, 3, 4})  # longer other -> early False
+    a -= {2}
+    assert list(a) == [1, 3]
+
+
+def test_complement_repr_included_form():
+    inc = complement(complement({1, 2}))
+    assert repr(inc) == 'complement(complement({1, 2}))'
+    assert repr(complement({1, 2})) == 'complement({1, 2})'
+
+
+def test_complement_typeerror_normalization():
+    c = complement({1, 2})
+    with raises(TypeError):
+        c.isdisjoint(object())
+    with raises(TypeError):
+        c.symmetric_difference_update(object())
+    with raises(TypeError):
+        c.difference_update(object())
+
+
+def test_complement_isdisjoint_included_excluded():
+    inc = complement(complement({1, 2}))
+    assert not inc.isdisjoint(complement({2, 3}))  # share 2
+    assert inc.isdisjoint(complement({1, 2}))  # both exclude 1 and 2
+
+
+def test_complement_ordering_branches():
+    exc = complement({1, 2})              # cofinite, missing {1, 2}
+    inc = complement(complement({1, 2}))  # finite {1, 2}
+    inc2 = complement(complement({1, 2, 3}))
+    inc3 = complement(complement({1}))
+
+    # excluded vs plain
+    assert (exc <= {1}) is False
+    assert (exc < {1}) is False
+    assert (exc >= {1}) is False
+    assert (exc > {1}) is False
+
+    # included vs excluded
+    assert (inc <= complement({2, 3})) is False
+    assert (inc < complement({2, 3})) is False
+    assert (inc >= complement({2, 3})) is False
+    assert (inc > complement({2, 3})) is False
+
+    # included vs plain and included vs included
+    assert inc <= {1, 2, 3}
+    assert inc < {1, 2, 3}
+    assert inc2 >= inc
+    assert inc2 > inc
+    assert inc <= inc2
+    assert inc < inc2
+    assert not (inc < inc)
+    assert inc <= inc
+    assert inc3 <= inc
+    assert not (inc3 >= inc)
+
+
+def test_complement_inplace_dunders_defer():
+    c = complement({1, 2})
+    assert c.__ior__(object()) is NotImplemented
+    assert c.__isub__(object()) is NotImplemented
+    assert c.__rsub__(object()) is NotImplemented
+    assert c.__lt__(object()) is NotImplemented
+    assert c.__gt__(object()) is NotImplemented

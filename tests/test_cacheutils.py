@@ -4,7 +4,10 @@ from abc import abstractmethod, ABCMeta
 
 import pytest
 
-from boltons.cacheutils import LRU, LRI, cached, cachedmethod, cachedproperty, MinIDMap, ThresholdCounter
+from boltons.cacheutils import (LRU, LRI, CachedFunction, CachedMethod,
+                                cached, cachedmethod, cachedproperty,
+                                make_cache_key, MinIDMap, ThresholdCounter,
+                                _KWARG_MARK)
 
 
 class CountingCallable:
@@ -608,3 +611,113 @@ def test_threshold_counter_non_reciprocal_threshold():
     for _ in range(20):
         tc.add('a')
     assert tc.get('a') == 20
+
+
+# --- additional behavioural coverage ---
+
+def test_lri_rejects_bad_max_size_and_on_miss():
+    with pytest.raises(ValueError):
+        LRI(max_size=0)
+    with pytest.raises(ValueError):
+        LRI(max_size=-3)
+    with pytest.raises(TypeError):
+        LRI(max_size=2, on_miss='not callable')
+
+
+def test_lri_print_ll(capsys):
+    cache = LRI(max_size=2)
+    cache['a'] = 'A'
+    assert cache._print_ll() is None
+    out = capsys.readouterr().out
+    assert '***' in out
+    assert 'a A' in out
+
+
+def test_make_cache_key_typed_includes_types():
+    key = make_cache_key((1,), {'a': 2}, typed=True)
+    assert list(key) == [1, _KWARG_MARK, ('a', 2), int, int]
+    # typed keys keep 3 and 3.0 distinct
+    assert make_cache_key((3,), {}, typed=True) != make_cache_key((3.0,), {}, typed=True)
+
+
+def test_make_cache_key_single_fasttype_returned_unwrapped():
+    assert make_cache_key(('only',), {}, typed=False) == 'only'
+    key = make_cache_key((1, 2), {}, typed=False)
+    assert isinstance(key, list)
+    assert repr(key) == '_HashedKey([1, 2])'
+
+
+def test_cachedfunction_rejects_bad_cache_and_reprs():
+    with pytest.raises(TypeError):
+        CachedFunction(lambda x: x, cache=42)
+
+    typed = CachedFunction(lambda x: x, {}, scoped=True, typed=True)
+    assert 'typed=True' in repr(typed)
+    unscoped = CachedFunction(lambda x: x, {}, scoped=False)
+    assert 'scoped=False' in repr(unscoped)
+    plain = CachedFunction(lambda x: x, {})
+    assert repr(plain) == f'CachedFunction(func={plain.func!r})'
+
+
+def test_cachedfunction_dict_cache_behaviour():
+    calls = []
+
+    def double(x):
+        calls.append(x)
+        return x * 2
+
+    fn = CachedFunction(double, {})
+    assert fn(2) == 4
+    assert fn(2) == 4
+    assert calls == [2]
+
+
+def test_cachedmethod_rejects_bad_cache():
+    with pytest.raises(TypeError):
+        CachedMethod(lambda self: None, cache=42)
+
+
+class _MethodOwner:
+    def __init__(self):
+        self.calls = 0
+
+    @cachedmethod({})
+    def value(self, x):
+        self.calls += 1
+        return x + 1
+
+
+def test_cachedmethod_with_plain_dict_cache():
+    owner = _MethodOwner()
+    assert owner.value(1) == 2
+    assert owner.value(1) == 2
+    assert owner.calls == 1
+
+
+def test_thresholdcounter_validates_threshold_and_most_common_edge():
+    with pytest.raises(ValueError):
+        ThresholdCounter(threshold=0)
+    with pytest.raises(ValueError):
+        ThresholdCounter(threshold=1)
+    counter = ThresholdCounter()
+    counter.add('a')
+    assert counter.most_common(0) == []
+    assert counter.most_common(-1) == []
+
+
+def test_minidmap_contains_and_iteration():
+    class Obj:
+        pass
+
+    mapping = MinIDMap()
+    obj = Obj()
+    other = Obj()
+    assert obj not in mapping
+    ident = mapping.get(obj)
+    assert obj in mapping
+    assert mapping.get(obj) == ident
+    assert list(mapping) == [obj]
+    assert list(mapping.iteritems()) == [(obj, ident)]
+    mapping.drop(obj)
+    assert obj not in mapping
+    assert other not in mapping

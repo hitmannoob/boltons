@@ -410,7 +410,7 @@ def daterange(start, stop, step=1, inclusive=False):
         pass
     else:
         raise ValueError('step expected int, timedelta, or tuple'
-                         ' (year, month, day), not: %r' % step)
+                         ' (year, month, day), not: %r' % (step,))
     
     m_step += y_step * 12
 

@@ -760,13 +760,12 @@ class _ComplementSet:
             inc, exc = frozenset(items), None
         if self._included is None:
             if exc is None:  # - +
-                self._excluded &= inc
+                self._excluded -= inc
             else:  # - -
-                self._excluded.discard(exc)
+                self._excluded &= exc
         else:
             if inc is None:  # + -
-                self._included &= exc
-                self._included, self._excluded = None, self._excluded
+                self._included, self._excluded = None, exc - self._included
             else:  # + +
                 self._included.update(inc)
 
@@ -786,7 +785,7 @@ class _ComplementSet:
             if inc is None:  # + -
                 self._included &= exc
             else:  # + +
-                self._included.discard(inc)
+                self._included -= inc
 
     def symmetric_difference(self, other):
         try:
