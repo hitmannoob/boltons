@@ -638,3 +638,90 @@ class TestMultiFileReader(TestCase):
         mfr = ioutils.MultiFileReader(f1, f2)
         utf8_double_file_str = mfr.read()
         assert utf8_double_file_str == (utf8_file_str * 2)
+
+
+class TestSeekabilityFlags(TestCase):
+    def test_seekable_readable_writable(self):
+        for flo in (ioutils.SpooledBytesIO(), ioutils.SpooledStringIO()):
+            with self.subTest(flo=type(flo).__name__):
+                self.assertTrue(flo.seekable())
+                self.assertTrue(flo.readable())
+                self.assertTrue(flo.writable())
+
+
+class TestSeekEdges(TestCase):
+    def test_seek_past_end_breaks_chunk_traversal(self):
+        f = ioutils.SpooledStringIO()
+        # more than one READ_CHUNK_SIZE so a whole empty chunk is read
+        f.write('a' * ioutils.READ_CHUNK_SIZE)
+        self.assertEqual(f.seek(50000), 50000)
+        self.assertEqual(f.tell(), 50000)
+
+    def test_seek_invalid_whence(self):
+        f = ioutils.SpooledStringIO()
+        f.write('abc')
+        with self.assertRaises(ValueError):
+            f.seek(0, 3)
+
+
+class TestIsTextFileobj(TestCase):
+    def test_getvalue_error_is_not_text(self):
+        class Boom:
+            def getvalue(self):
+                raise RuntimeError('cannot materialize')
+
+        self.assertFalse(ioutils.is_text_fileobj(Boom()))
+
+    def test_bytes_and_string_streams(self):
+        self.assertFalse(ioutils.is_text_fileobj(io.BytesIO(b'abc')))
+        self.assertTrue(ioutils.is_text_fileobj(io.StringIO('abc')))
+
+
+class TestMultiFileReaderErrors(TestCase):
+    def test_rejects_non_file_objects(self):
+        with self.assertRaises(TypeError):
+            ioutils.MultiFileReader(1, 2)
+
+    def test_seek_rejects_non_zero_whence(self):
+        mfr = ioutils.MultiFileReader(io.BytesIO(b'ab'))
+        with self.assertRaises(NotImplementedError):
+            mfr.seek(0, os.SEEK_END)
+
+    def test_seek_rejects_non_zero_offset(self):
+        mfr = ioutils.MultiFileReader(io.BytesIO(b'ab'))
+        with self.assertRaises(NotImplementedError):
+            mfr.seek(1)
+
+
+class _BrokenComparison(ioutils.SpooledBytesIO):
+    fail_seek = False
+
+    def __next__(self):
+        type(self).fail_seek = True
+        raise RuntimeError('comparison failed')
+
+    def seek(self, *args, **kwargs):
+        if type(self).fail_seek:
+            raise RuntimeError('seek failed')
+        return super().seek(*args, **kwargs)
+
+
+class TestComparisonAndDestructor(TestCase):
+    def tearDown(self):
+        _BrokenComparison.fail_seek = False
+
+    def test_eq_restores_positions_then_reraises(self):
+        a = _BrokenComparison()
+        a.write(b'same')
+        b = _BrokenComparison()
+        b.write(b'same')
+        with self.assertRaises(RuntimeError):
+            a == b
+
+    def test_del_suppresses_close_errors(self):
+        class CloseBoom(ioutils.SpooledBytesIO):
+            def close(self):
+                raise RuntimeError('close failed')
+
+        flo = CloseBoom()
+        self.assertIsNone(flo.__del__())
